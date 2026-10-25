@@ -1,0 +1,22 @@
+bioeconomy/
+├── backend/
+│   ├── app/
+│   │   ├── api/
+│   │   ├── core/
+│   │   ├── models/
+│   │   ├── schemas/
+│   │   ├── services/
+│   │   └── main.py
+│   ├── tests/
+│   ├── pyproject.toml
+│   └── .env.example
+├── frontend/
+├── firmware/
+│   └── esp32/
+├── data/
+│   ├── raw/
+│   └── processed/
+├── docs/
+├── docker-compose.yml
+├── .gitignore
+└── README.md

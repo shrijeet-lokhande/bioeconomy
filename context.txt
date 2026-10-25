@@ -1,0 +1,388 @@
+PROJECT CONTEXT — Bioeconomy
+Last updated: 2026-10-24 (Task 005 COMPLETE — admin panel implemented and
+live: server-enforced /api/v1/admin/* with role=="admin" gate ordered AFTER
+auth (401) and email-verification (403) gates; bootstrap SQL promoted
+shrijeet733@gmail.com to verified + admin; tests 47 pytest / 69 Vitest;
+see section 8 for final state. Previous checkpoints: Task 003 secure email
+verification (33 pytest / 64 Vitest, one REAL Resend delivery); Task 001
+frontend foundation; Task 002 demo dashboard/biomass listings;
+Authentication task — registration/login with PostgreSQL sessions.)
+Source of brief: bioeconomy/README.md + user's task briefs. Resend API key
+(send-only, restricted) lives in backend/.env ONLY; user was advised to
+rotate it since it passed through chat history.
+
+======================================================================
+1. WHAT THIS PROJECT IS
+======================================================================
+- Bioeconomy — "Turning agricultural and forest data into actionable
+  value." Platform for farmers/landowners: agriculture data,
+  geospatial intelligence, biomass marketplace, IoT telemetry,
+  AI-assisted insights.
+- Guiding principle: TRUSTWORTHY DATA FIRST, USEFUL DECISIONS SECOND.
+  Honesty rules in force: never claim unimplemented things; the
+  register/response UI reports real email-delivery status
+  (accepted/failed) and never pretends a message was sent.
+
+======================================================================
+2. FULL-SYSTEM ARCHITECTURE (current state)
+======================================================================
+- FRONTEND (working): React 19 + TS 5.9 + Vite 7 — auth pages +
+  protected routes now talk to the REAL backend session API via
+  /api (Vite dev proxy). Demo listing store: still localStorage.
+- BACKEND (working, auth slice): FastAPI 0.162 at
+  backend/src/backend/main.py (`backend.main:app`), sync SQLAlchemy
+  2.1 + psycopg 3, PostgreSQL 18.6 at localhost:5432.
+- TARGET (not built yet): Leaflet maps (PostGIS NOT available on this
+  PostgreSQL instance — the extension is absent from the cluster),
+  ESP32 telemetry, analytics/AI.
+
+======================================================================
+3. VERIFIED RUNTIME (machines/tools, 2026-10-24)
+======================================================================
+- Node v20.20.2 + npm 12.2.1 (unsupported pair; npm blocks install
+  scripts by policy — esbuild binary ships via optional dep instead).
+- Python 3.14.8, uv 0.13.5, git 2.56.0. PostgreSQL 18.6 (server
+  running as a native service; no Docker on this machine).
+- Dev DB: bioeconomy (role bioeconomy_app, CREATEDB=true). Real
+  credentials in backend/.env (gitignored). backend/.env.example =
+  placeholders only.
+- LIVE SERVERS: backend uvicorn on 127.0.0.1:8000 (health ok,
+  MAIL_BACKEND=resend from backend/.env; restarted with final code),
+  PostgreSQL on 5432. Frontend dev server on 5173 was NOT running at
+  last check — user restarts it (restart picks up the /api proxy).
+- MAIL CONFIG (Task 003): MAIL_BACKEND=console | smtp | resend via
+  env. Current .env: MAIL_BACKEND=resend, RESEND_API_KEY=<user's
+  send-only key>, MAIL_FROM_ADDRESS=onboarding@resend.dev,
+  APP_BASE_URL=http://localhost:5173, VERIFICATION_TOKEN_MINUTES=30.
+  Resend test-mode WITHOUT a verified domain: only the account OWNER's
+  mailbox (shrijeet733@gmail.com) is deliverable; other recipients
+  get HTTP 403/422 → surfaced honestly as email_delivery:"failed".
+  Fix: verify a domain at resend.com/domains + MAIL_FROM_ADDRESS on
+  that domain. Console backend writes copyable .eml into gitignored
+  backend/.mail_outbox/ (lines ≤998 chars, no QP soft-wrap).
+
+======================================================================
+4. GIT STATE (unchanged, unresolved)
+======================================================================
+- Root repo: master, ZERO commits, all untracked.
+- backend/ is a SEPARATE nested repo (also zero commits). Do NOT
+  `git add .` at root without resolving the nesting question.
+- backend/.env + backend/.mail_outbox/ (once created) must be
+  gitignored; no credentials or tokens in any tracked file.
+
+======================================================================
+5. AUTHENTICATION (implemented + verified, Task 002)
+======================================================================
+Backend endpoints (/api/v1/auth):
+- POST /register — 201 UserPublic; 409 dup (case-insensitive, race
+  safe); 422 validation; ignores client role/is_active fields.
+- POST /login — 200 UserPublic + HttpOnly SameSite=Lax cookie
+  bio_session; generic non-revealing 401; dummy-hash timing
+  equivalence for unknown email; 403 inactive accounts.
+- POST /logout — 204, revokes session + clears cookie (replay-safe).
+- GET /me — 200 UserPublic / 401 unauthenticated|expired|revoked.
+Design:
+- Argon2id hashes (argon2-cffi OWASP defaults); only token SHA-256 in
+  auth_sessions; absolute 7-day expiry; purge on login.
+- CSRF: SameSite=Lax + Origin allow-list on unsafe methods; CORS
+  allow-list from settings; COOKIE_SECURE must be 1 in production.
+- Rate limiting: process-local scope-keyed enforce_rate_limit
+  (register/login, 5/min per IP) — documented limitation; Redis
+  shared limiter = follow-up.
+- Password reset: NOT implemented. Not claimed anywhere.
+
+Data model (migration 8a2056eb9760, autogenerate; chain has exactly
+one revision today):
+- users: id UUID pk, full_name(200), email(320) UNIQUE lowercase,
+  password_hash(255), role(32) default 'user', is_active, created_at/
+  updated_at (tz-aware).
+- auth_sessions: id UUID pk, token_hash(64) UNIQUE, user_id FK
+  CASCADE, expires_at, revoked_at, created_at.
+
+Key reusable internals for Task 003:
+- sessions.py: generate_session_token()/hash_token() = security
+  pattern to mirror for verification tokens.
+- rate_limit.enforce_rate_limit(request, scope) — add scopes.
+- api/auth.py: _untrusted_origin(request), _set_session_cookie(...),
+  get_current_user in api/dependencies.py (gate point for verified-
+  email enforcement).
+- conftest.py: isolates bioeconomy_test_<hex> DB via migration chain;
+  admin ops (CREATE/DROP DATABASE) run over a connection to the
+  bioeconomy DB in AUTOCOMMIT mode (TCP to `postgres` DB fails pg_hba
+  auth for the app role). str(URL) MASKS PASSWORDS — use
+  render_as_string(hide_password=False).
+
+======================================================================
+6. FRONTEND (as of auth task)
+======================================================================
+- src/lib/api.ts — typed fetch wrapper, credentials include, generic
+  error mapping. src/auth/AuthContext.tsx — session restore on load,
+  login/register/logout. NO token storage in localStorage.
+- src/pages/LoginPage.tsx / RegisterPage.tsx — validation mirroring
+  server rules (src/auth/validation.ts), accessible errors, success
+  state, registration banner + prefill via sessionStorage flag
+  (rememberRegisteredEmail/consumeRegisteredEmail).
+- Route gating (App.tsx): protected variant for overview/inventory/map/
+  analytics/settings; auth pages (login/register in routes.ts,
+  access: "auth") redirect signed-in users; "Checking your session…"
+  during restore so nothing flashes.
+- AppShell header: user name + email + Log out. Demo dashboards/data
+  behavior unchanged (biomass demo provenance retained).
+- Tests: 7 files / 61 Vitest tests incl. app-level jsdom flows
+  (src/auth/AuthFlow.test.tsx: protection, login, logout, restore,
+  register validation; stubbed fetch + HashChangeEvent pattern).
+
+======================================================================
+7. TASK 003 — EMAIL VERIFICATION (FINAL STATE: IMPLEMENTED + LIVE)
+======================================================================
+Status: DONE. All of the plan below was implemented as specified, tested
+(backend 33/33 = 19 regression + 14 NEW V1–V14 scenarios; frontend 64/64;
+tsc clean; build OK; full live E2E curl cycle through the console outbox
+AND one real Resend delivery accepted by the provider). Details in
+docs/CURRENT_STATE.md + docs/SECURITY.md + backend/README.md.
+
+7.1 DATABASE (one new Alembic revision on top of 8a2056eb9760)
+- users: + is_email_verified bool server_default false;
+  + email_verified_at nullable tz-aware timestamp.
+- NEW table auth_email_verification_tokens: id UUID pk, user_id FK
+  CASCADE, token_hash(64) UNIQUE (SHA-256 of raw token — raw never
+  stored), expires_at, consumed_at nullable, created_at. Chosen over
+  columns-on-users: per-issue tokens, supersede policy, queryable
+  consumed/expired state machine; mirrors auth_sessions pattern.
+- Migration behavior: existing users DO NOT auto-verify (stays
+  false). Admin verification path = documented explicit process in
+  docs/DATABASE.md. OPEN DECISION (user input, default stands):
+  documented admin SQL vs small CLI `python -m backend.admin
+  verify-email <email>`.
+
+7.2 TOKEN DESIGN
+- secrets.token_urlsafe(32) (256-bit); only SHA-256 stored; expiry
+  30 min via VERIFICATION_TOKEN_MINUTES (configurable).
+- ATOMIC consumption: single conditional UPDATE ... SET consumed_at=now()
+  WHERE token_hash=:h AND consumed_at IS NULL AND expires_at>now()
+  RETURNING user_id; mark user verified in SAME transaction. Row-level
+  atomicity makes concurrent double-use impossible.
+- Resend policy: issuing a new token SUPERSEDES all prior unconsumed
+  tokens for that user; purge expired/consumed opportunistically.
+
+7.3 EMAIL DELIVERY (new backend module emails.py)
+- EmailSender interface; MAIL_BACKEND env selects:
+  console (dev default) — writes message to clearly labeled,
+  gitignored backend/.mail_outbox/ file + log line (recipient/
+  subject ONLY; never token or full URL) — OR smtp (stdlib smtplib):
+  MAIL_HOST/MAIL_PORT/MAIL_USERNAME/MAIL_PASSWORD/MAIL_FROM_ADDRESS/
+  MAIL_USE_TLS (STARTTLS). Never hardcoded creds; never log tokens
+  or full URLs; provider failures never reported as delivered.
+- Verification link built from APP_BASE_URL ONLY (never Host header).
+
+7.4 API CHANGES
+- POST /api/v1/auth/verify-email {token} -> 200; 400 generic safe
+  message for invalid/expired/used (indistinguishable); light IP
+  rate limit.
+- POST /api/v1/auth/resend-verification {email} -> ALWAYS neutral
+  confirmation (no account enumeration); internally rate-limited
+  (scope resend) and only issues+sends when account exists+unverified.
+- Register updated: create user unverified -> issue token -> attempt
+  send -> 201 {verification_required:true, email_delivery:"accepted"
+  |"failed"}; failure recoverable via resend; response NEVER contains
+  token. DB-success+send-failure is allowed and honestly reported.
+- GATE: login of unverified -> 403 {code:"email_verification_required"},
+  NO session created. get_current_user adds verified check: sessions
+  of unverified users (incl. pre-feature ones) -> 403 on protected
+  endpoints. Verified users unchanged. /me follows same gate.
+
+7.5 FRONTEND
+- Verification-pending screen post-registration (honest about
+  delivery failure); link to resend.
+- #/verify-email?token=... page: read token, POST, loading/success/
+  expired/invalid states; STRIP token from visible URL
+  (history.replaceState) after processing; sign-in link on success.
+- Resend UI: pending state, neutral confirmation, no enumeration.
+- Login page: 403 verification-required -> route to pending screen;
+  typed email kept in sessionStorage (email only; NO tokens in any
+  storage/analytics; nothing logged).
+- CSS additions consistent with auth-card design.
+
+7.6 NEW ENV VARS (placeholders in .env.example; real values only in
+gitignored backend/.env): MAIL_BACKEND(console|smtp), MAIL_HOST,
+MAIL_PORT, MAIL_USERNAME, MAIL_PASSWORD, MAIL_FROM_ADDRESS,
+MAIL_USE_TLS, APP_BASE_URL, VERIFICATION_TOKEN_MINUTES.
+OPEN DECISION (user input, default = generic SMTP + console dev
+backend): which real mail provider to document dialed-in.
+
+7.7 TESTS (backend = all 14 mandated scenarios)
+unverified registration; mail generated via configured sender;
+raw token NOT in DB; valid token verifies; expired rejected; invalid
+rejected; token not reusable; concurrent requests consume once;
+unverified blocked from protected endpoints (incl. old sessions);
+verified user logs in+uses endpoints; resend supersedes prior
+tokens; rate limit + neutral responses; provider failure handled
+honestly; existing accounts remain unverified absent explicit admin
+verification. Tests inject a CAPTURING sender via dependency
+override (no network). Regression: 19 pytest + 61 Vitest must pass.
+Frontend new tests: verification success/invalid/expired, resend
+behavior, unverified-login state.
+
+7.8 DOCS TO UPDATE
+context.txt (this file), docs/CURRENT_STATE.md, docs/SECURITY.md,
+docs/API_CONTRACT.md, docs/DATABASE.md (migration behavior + admin
+verification), backend/README.md (local mail testing + production
+SMTP config), .env.example, root README.md. Note: email verification
+confirms inbox access at a point in time — never "proof of identity".
+
+7.9 IMPLEMENTATION ORDER (when coding starts)
+1 Migration -> 2 verification.py token service + emails.py + config
+-> 3 register/login/gate changes + two new endpoints -> 4 backend
+tests -> 5 frontend (pages, api.ts, routing, tests) -> 6 regression
+pytest+Vitest+tsc+build -> 7 live curl E2E (console outbox) -> docs
+-> final report. Existing 61 Vitest keep passing; demo pages untouched.
+
+======================================================================
+8. TASK 005 — ADMIN PANEL (FINAL STATE: IMPLEMENTED + LIVE)
+======================================================================
+Status: DONE. Server-enforced authorization (the first in the app),
+supervision UI, tests green, live server restarted with the router.
+Details in docs/API_CONTRACT.md (Admin section), docs/SECURITY.md,
+docs/DATABASE.md (bootstrap), backend/README.md, docs/CURRENT_STATE.md.
+
+8.1 AUTHORIZATION MODEL
+- Gate order per request: 401 (no/bad/expired/revoked cookie or
+  inactive owner) -> 403 {code:"email_verification_required"}
+  (session on unverified account) -> 403 {code:"admin_required"}
+  (verify user role != 'admin'). codes.py adds ADMIN_REQUIRED_*.
+- require_admin lives in backend/src/backend/api/admin.py
+  (router prefix /api/v1/admin, tag admin). Roles are RE-READ from
+  the DB every request: a flipped role applies to an already-issued
+  session on its next request (test proves both directions).
+- NO endpoint can create an admin anywhere: the only bootstrap is
+  operator SQL: UPDATE users SET role='admin' WHERE email='<…>';
+  (docs/DATABASE.md). Executed once for shrijeet733@gmail.com (also
+  verified 2026-10-24), so the user can sign in and use the panel.
+- Self-protection (server-side 400s): admin cannot deactivate their
+  own account, un-verify their own account, or demote their own role
+  (last-admin lockout guard). Other admins are fair game.
+
+8.2 ENDPOINTS (all under /api/v1/admin)
+- GET /overview -> {total_users, verified_users, active_users,
+  admin_users, live_sessions, recent_registrations[5]}.
+- GET /users?search&page&page_size -> {total, page, page_size,
+  items:[AdminUserSummary]}; search = ILIKE over email/full_name,
+  ordering always created_at DESC, page 1-…, page_size 1-100.
+- GET /users/{id} -> AdminUserDetail incl. latest 50 session ROWS as
+  metadata only (id, created, expires, revoked, live) — token
+  hashes are NEVER exposed (test asserts absence).
+- PATCH /users/{id} {is_active?, is_email_verified?} -> updated
+  summary; un-verify/deactivate ALSO revokes all live sessions of
+  the target in the same action (DB-verified); un-verify clears
+  email_verified_at, force-verify stamps it; no-op = 200.
+- POST /users/{id}/sessions/revoke {} (all) | {"session_id":…} (one)
+  -> {"revoked": n}; unknown session id on real user = 200 n:0;
+  unknown user = 404 generic "User not found.".
+- POST /users/{id}/role {"role":"user"|"admin"} -> updated summary;
+  other values 422; unknown user 404.
+- Mutations run _untrusted_origin 403 + rate limit scope "admin";
+  CORS allow_methods is now ["GET","POST","PATCH"] in main.py which
+  also includes the admin router.
+
+8.3 FRONTEND
+- routes.ts: #/admin (protected, prototype) with showInNav FALSE — the
+  panel is deliberately NOT in the primary navigation and is reachable
+  only by entering #/admin directly (no duplicate route). App.tsx
+  renders pages/AdminPage.tsx there. AppShell: header "Admin" badge
+  only when user.role === "admin" (informational only; the server is
+  the real gate).
+- AdminPage: two tabs. Overview = stat cards (users/verified/active/
+  admins/live sessions) + recent registrations list. Users = search
+  form + count + paginated table (state badge Combine… deactivate /
+  activate, force-verify / un-verify, revoke-all, promote / demote)
+  + per-user EXPANDABLE session list with per-session revoke.
+  Self row: buttons disabled with explanatory title. 403 ->
+  dedicated "does not have administrator access" card; limit/empty/
+  error states covered. Confirm-gated destructive actions use
+  window.confirm.
+- lib/api.ts: ADMIN_REQUIRED_CODE, adminApi (overview/users/
+  userDetail/patchUser/setRole/revokeSessions), Admin* types,
+  RequestOptions now supports PATCH.
+
+8.4 TESTS
+- Backend tests/test_admin_api.py: 13 scenarios — anon 401 on all
+  verbs; non-admin 403 with structured code (mutating a random uuid
+  still 403 BEFORE any 404); documented-promotion grants access;
+  per-request role flips live; search+pagination+422s; deactivate
+  blocks login, reactivation restores; force-verify then un-verify
+  -> sessions revoked IN THE DB and next login re-gated; revoke
+  endpoint zero/one/all/live-revocation cases; self-protection 400s
+  (still functional afterwards); promotion of unverified user ->
+  verification gate outranks admin gate (forged live session);
+  unknown-user 404 no-leak; CSRF 403; OpenAPI paths registered.
+  Helpers imported from test_auth_api (no tests/__init__.py;
+  absolute import works because pytest puts tests/ on sys.path).
+- Frontend (AuthFlow.test.tsx "admin panel"): nav entry + badge
+  hidden for normal users; explicit no-access card on 403; admin
+  loads stats+users (nav shows Admin); deactivate PATCHes
+  {is_active:false} on the ENABLED (non-self) button after
+  window.confirm stub -> feedback "Done.". 69/69 total; tsc 0;
+  build OK (260.82 kB / gzip 80.21 kB).
+- Test-harness notes: stub matcher now strips query strings
+  (url.split("?")[0].endsWith) since /admin/users carries
+  ?page=&page_size=; seeded admin + target rows must have DIFFERENT
+  ids or self-protection disables the action under test (this bit
+  me once); wait for data-loaded UI (findByRole on the Users tab
+  button) before interacting — the header name appears earlier.
+
+8.5 RUNTIME + SMOKE
+- Backend restarted with admin router; /api/v1/health ok.
+- Anonymous live curl: GET /api/v1/admin/overview -> 401 "Not
+  authenticated." (matches the trusted tests); /openapi.json lists
+  all five admin paths.
+- Playwright/browser click-through NOT executed: evidence is jsdom
+  tests + curl only.
+
+======================================================================
+9. COMMANDS (verified)
+======================================================================
+Backend:  cd backend && cp .env.example .env (edit URL) && uv sync
+          && uv run alembic upgrade head
+          && uv run uvicorn backend.main:app --reload
+          (App NEVER creates tables — migrations only.)
+Frontend: cd frontend && npm install && npm run dev (restart required
+          to pick up the /api proxy).
+Tests:    backend: uv run pytest (47 tests; per-run isolated
+          bioeconomy_test_<hex> DB; migrated via chain; dropped after;
+          dev DB never touched). frontend: npm run test (69 tests).
+DB start (this machine, no Docker): sudo systemctl + native install
+          steps recorded in backend/README.md.
+
+======================================================================
+10. KNOWN ISSUES / FOLLOW-UPS
+======================================================================
+- RESOLVE BY USER: verify a domain at resend.com/domains to allow
+  deliveries to arbitrary recipients; then set MAIL_FROM_ADDRESS to
+  an address on that domain. Until then only shrijeet733@gmail.com
+  receives real email (Resend test-mode owner restriction).
+- ROTATE the Resend API key (it passed through chat history): revoke
+  it in the Resend dashboard, create a new one, update backend/.env
+  only (never commit it).
+- shrijeet733@gmail.com is verified (the user clicked the real link on
+  2026-10-24) AND admin (Task 005 bootstrap SQL) — signing in shows the
+  Admin tab and badge immediately; once used, older emailed verification
+  links are dead tokens (harmless).
+- shrijeet777@proton.me, test.user@example.com, rl-test@example.com
+  and e2e-* rows were admin-verified via the documented SQL (provider
+  cannot deliver there in test mode).
+- Real live E2E caught TWO bugs that are now fixed: console outbox
+  quoted-printable soft-wrap mangled copied links (fixed: 998-char
+  lines in the console backend; real mail clients were never
+  affected), and uvicorn's default WARNING root level hid successful
+  delivery logs (fixed: logging.basicConfig(INFO) in create_app).
+- Nested backend repo (owner decision pending; zero commits). Never
+  `git add .` at root.
+- Security limitations (docs/SECURITY.md): process-local rate
+  limiting, no password reset, NO ADMIN AUDIT TRAIL yet (admin_audit_log
+  is the natural next hardening), not production-hardened.
+- Admin panel scope supervision = users/sessions/verification state only;
+  listings remain the localStorage demo with NO admin view of them
+  (deliberate; no fake supervision of unbuilt entity endpoints).
+- PostGIS absent from this cluster (Phase 4 decision later).
+- uv package script `backend = backend:main` untouched (placeholder
+  print in __init__.py; harmless).
