@@ -873,3 +873,250 @@ p {
   }
 }
 
+
+/* ---------- Biomass inventory + marketplace ---------- */
+
+.form-note {
+  background: var(--color-forest-100);
+  border: 1px solid var(--color-forest-500);
+  color: var(--color-forest-900);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+}
+
+/* Accurate-but-needs-attention outcome (e.g. deletion finished with pending
+   file cleanup) — distinct from both plain success and hard errors. */
+.form-warn {
+  background: var(--color-earth-100);
+  border: 1px solid var(--color-earth-700);
+  color: var(--color-earth-700);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+}
+
+.field-note {
+  color: var(--color-ink-600);
+  font-size: 0.85rem;
+  margin: 0 0 var(--space-3);
+}
+
+.field-grid,
+.manage-grid {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.manage-block {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.manage-block h3 {
+  margin-top: 0;
+}
+
+.listing-cards {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+  list-style: none;
+  padding: 0;
+}
+
+.listing-card {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.listing-card h3 {
+  margin: 0;
+}
+
+.order-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.order-row {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.order-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.muted-line {
+  color: var(--color-ink-600);
+  font-size: 0.85rem;
+}
+
+.pager {
+  margin-top: var(--space-3);
+}
+
+.alert-strip {
+  border: 1px solid var(--color-earth-500);
+  background: var(--color-earth-100);
+}
+
+.audit-detail {
+  max-width: 24rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  margin-top: var(--space-2);
+}
+
+@media (min-width: 48rem) {
+  .field-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .manage-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 48rem) {
+  .listing-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- Record images (1–5 per lot / listing) ---------- */
+
+.image-upload-field {
+  margin-top: var(--space-3);
+}
+
+.image-upload-field .field-label {
+  display: block;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--color-ink-600);
+}
+
+.image-upload-dropzone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px dashed var(--color-line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--color-off-white);
+}
+
+.image-upload-dropzone--over {
+  border-color: var(--color-forest-500);
+  background: var(--color-forest-100);
+}
+
+.image-upload-dropzone--full {
+  border-style: solid;
+  opacity: 0.75;
+}
+
+.image-upload-count {
+  font-size: 0.85rem;
+  color: var(--color-ink-600);
+}
+
+.image-upload-previews {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.image-upload-preview {
+  width: 7rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.image-upload-preview img {
+  width: 100%;
+  height: 5rem;
+  object-fit: cover;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+}
+
+.record-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.record-thumb,
+.record-thumb--empty {
+  flex: none;
+  width: 3rem;
+  height: 3rem;
+  object-fit: cover;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+}
+
+.record-thumb--empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-ink-600);
+  background: var(--color-off-white);
+}
+
+.record-gallery {
+  margin-bottom: var(--space-3);
+}
+
+.record-gallery__main {
+  max-width: 100%;
+  max-height: 20rem;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  display: block;
+}
+
+.record-gallery__thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.record-gallery__thumb {
+  padding: 0;
+  border: 2px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+  width: 3.5rem;
+  height: 3.5rem;
+}
+
+.record-gallery__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: calc(var(--radius-sm) - 2px);
+  display: block;
+}
+
+.record-gallery__thumb--active {
+  border-color: var(--color-forest-500);
+}

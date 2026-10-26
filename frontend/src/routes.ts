@@ -1,15 +1,16 @@
 /**
  * Route registry for the prototype.
  *
- * Navigation is intentionally dependency-free hash routing while only the
- * Overview, Biomass Inventory, and auth pages are real. Re-evaluate when
- * more sections become real; replacing this with a proper router (and
- * history URLs) must be an explicit decision.
+ * Navigation is intentionally dependency-free hash routing; the Overview,
+ * Biomass Inventory, Marketplace, Admin console, and auth pages are real.
+ * Re-evaluate when more sections become real; replacing this with a proper
+ * router (and history URLs) must be an explicit decision.
  */
 
 export type RouteId =
   | "overview"
   | "biomass-inventory"
+  | "marketplace"
   | "map-explorer"
   | "analytics"
   | "settings"
@@ -61,8 +62,22 @@ export const ROUTES: readonly AppRoute[] = [
     hash: "#/biomass-inventory",
     heading: "Biomass Inventory",
     description:
-      "Demo listing workflow: create, filter, sort, edit, and delete " +
-      "clearly labelled demo listings stored in this browser.",
+      "Real backend workflow: record stock with full movement history, " +
+      "adjust quantities with auditable reasons, transfer to other users, " +
+      "and publish lots on the marketplace.",
+    status: "prototype",
+    showInNav: true,
+    access: "protected",
+  },
+  {
+    id: "marketplace",
+    label: "Marketplace",
+    hash: "#/marketplace",
+    heading: "Marketplace",
+    description:
+      "Browse listed biomass, request purchases with atomic stock " +
+      "reservation, and manage your own listings, purchases, and sales " +
+      "through the full transaction lifecycle.",
     status: "prototype",
     showInNav: true,
     access: "protected",

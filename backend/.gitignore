@@ -14,3 +14,6 @@ wheels/
 
 # Email outbox from the console dev backend (contains live tokens in links)
 .mail_outbox/
+
+# Server-stored biomass record images (uploaded user files)
+.data/

@@ -10,7 +10,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.admin import router as admin_router
+from backend.api.admin_biomass import router as admin_biomass_router
 from backend.api.auth import router as auth_router
+from backend.api.biomass import router as biomass_router
 from backend.config import get_settings
 
 
@@ -31,6 +33,8 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(admin_router)
+    app.include_router(biomass_router)
+    app.include_router(admin_biomass_router)
 
     @app.get("/api/v1/health", tags=["health"])
     def health() -> dict[str, str]:

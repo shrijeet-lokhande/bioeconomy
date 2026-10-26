@@ -2,8 +2,9 @@
 
 FastAPI service for the Bioeconomy platform. Current scope: user
 registration, login, logout, email verification, and session-based
-current-user profile, plus the role-gated admin supervision API (`/api/v1/admin/*`, Task 005) — backed by PostgreSQL with Alembic
-migrations. The biomass/API-v1 feature set is not implemented yet.
+current-user profile; the role-gated admin supervision API (`/api/v1/admin/*`, Task 005); and the biomass inventory + marketplace
+feature (`/api/v1/biomass/*` + `/api/v1/admin/biomass/*`, Task 006) —
+backed by PostgreSQL with Alembic migrations.
 
 ## Stack
 
@@ -36,7 +37,10 @@ migrations. The biomass/API-v1 feature set is not implemented yet.
    # edit .env — set DATABASE_URL to your real connection string
    ```
 
-3. Apply migrations (creates `users`, `auth_sessions`; never start tables
+3. Apply migrations (creates `users`, `auth_sessions`, and — from
+   revision `5c1f2a9d7b40` — the biomass inventory/marketplace tables;
+   from `f1c49d83a2b0` — the `biomass_images` table; from `b4d7e91c2a55`
+   — the `biomass_deletion_cleanups` tracking table; never start tables
    with `create_all()`):
 
    ```bash
@@ -69,6 +73,8 @@ migrations. The biomass/API-v1 feature set is not implemented yet.
 | `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_USE_TLS` | Generic SMTP configuration (`MAIL_USE_TLS=1` enforces STARTTLS) |
 | `MAIL_FROM_ADDRESS` | Sender address of verification emails |
 | `RESEND_API_KEY` | Resend API key (secret; `.env` only). A failed/absent key is never treated as a successful send |
+| `BIOMASS_IMAGE_UPLOAD_DIR` | Where uploaded record-image files are stored (default `.data/biomass_images`, gitignored; server-generated names; served only via the authorized image endpoint) |
+| `BIOMASS_IMAGE_MAX_MB` | Per-image size cap in MB, default 5 (1–5 images per record is a fixed server rule) |
 
 ## API — authentication (`/api/v1/auth`)
 
@@ -114,7 +120,63 @@ is granted ONLY by operator SQL (below).
 Promotion takes effect on the target's NEXT request (roles are not frozen
 into sessions).
 
-### Granting admin (operator-only bootstrap)
+## API — biomass inventory & marketplace (`/api/v1/biomass`, Task 006)
+
+All endpoints require a verified session. Every state-changing request
+validates ownership/status server-side; a non-owner detail read gets the
+same 404 body as a missing entity. Quantities are Decimal, serialized as
+JSON strings (never floats). Full status/error semantics:
+docs/API_CONTRACT.md.
+
+| Method | Path | Success | Errors |
+| --- | --- | --- | --- |
+| GET | `/biomass/inventory` | 200 `LotPage` (summary, search/status/unit/sort, paging) | 422 bad params |
+| POST | `/biomass/inventory` | 201 lot with its 1–5 COMPULSORY images (`multipart/form-data`: `payload` = LotCreateRequest JSON + `images` files; mid-part format sniffed from magic bytes, ≤ `BIOMASS_IMAGE_MAX_MB` each → 413; validated before any write) (initial movement `initial` recorded) | 422 validation / >5 or 0 images, 413 oversize, 401/403 |
+| GET | `/biomass/images/{image_id}` | 200 image bytes with the SNIFFED media type — lot images: owner/admin; listing images: seller/admin, any verified user while `active` | 404 otherwise (no oracle), 401 anonymous |
+| GET | `/biomass/inventory/{lot_id}` | 200 `LotDetail {lot, movements}` | 404 (incl. non-owner) |
+| PATCH | `/biomass/inventory/{lot_id}` | 200 metadata-only edit | 422 if body contains `quantity` (record an adjustment instead), 404 |
+| POST | `/biomass/inventory/{lot_id}/adjust` | 200 adjustment; appends one movement | 409 over-removal/no-op, 422 reason missing/empty, 404 |
+| POST | `/biomass/inventory/{lot_id}/archive` / `/restore` | 200 | 409 open listings / wrong state, 404 |
+| POST | `/biomass/inventory/{lot_id}/transfer` | 201 `{source_lot, transferred_lot}` (recipient gets a new lot + `transfer_in` journal) | 400 unknown/inactive/self recipient, 409 insufficient quantity, 404 |
+| GET | `/biomass/inventory/export.csv` | 200 `text/csv` (caller's own rows) | |
+| GET | `/biomass/marketplace/listings` | 200 active public cards (sweeps stale reservations first) | |
+| GET | `/biomass/marketplace/listings/{id}` | 200 `ListingCard` | 404 |
+| POST | `/biomass/marketplace/listings` | 201 `ListingOwn` with its 1–5 COMPULSORY images (`multipart/form-data`: `payload` + `images`, same rules as lot creation; image validation runs before the lot lookup) (offered quantity must fit the lot with its other live listings including drafts) | 409 offered > available room, 422 validation / image count or format, 413 oversize, 404 unknown/non-owned lot |
+| GET | `/biomass/marketplace/my/listings` | 200 seller management view | |
+| PATCH | `/biomass/marketplace/listings/{id}` | 200 seller edit (ownership enforced) | 403/404, 409, 422 |
+| POST | `/biomass/marketplace/listings/{id}/publish` / `/pause` / `/resume` / `/withdraw` | 200 | 403/404, 409 wrong state |
+| POST | `/biomass/marketplace/listings/{id}/orders` | 201 order `requested` + atomic reservation; same `client_request_id` replay → 200 same order | 409 insufficient/self-purchase, 422 |
+| GET | `/biomass/marketplace/orders?role=&status_filter=` (+ `{id}`) | 200 (buyer/seller visibility only) | 404 (incl. not-your-order) |
+| POST | `/biomass/marketplace/orders/{id}/cancel` | buyer cancels `requested`; releases reservation exactly once | 403/404, 409 |
+| POST | `/biomass/marketplace/orders/{id}/accept` / `/reject` | seller decides; reject releases | 403/404, 409 |
+| POST | `/biomass/marketplace/orders/{id}/fulfil` | reserved → sold | 403/404, 409 |
+| POST | `/biomass/marketplace/orders/{id}/confirm` | buyer accepts delivery → `completed` (terminal) | 403/404, 409 |
+| POST | `/biomass/marketplace/orders/{id}/dispute` | buyer freezes (reason required) | 403/404, 409 |
+| POST | `/biomass/marketplace/orders/{id}/settlement` | seller records the MANUAL off-platform settlement note (no payment provider; never presented as money captured) | 403 (buyer), 404, 409 |
+
+`requested` orders unaccepted for 72 hours are released lazily (status
+`cancelled`, `released_at` set, one `release` movement).
+
+## API — admin biomass + audit (`/api/v1/admin/biomass`, Task 006)
+
+Behind the same `require_admin` gates as Task 005; every state change
+appends an audited `biomass_audit_events` row (append-only at the DB
+level via the `biomass_audit_append_only` trigger — UPDATE and DELETE are
+rejected by the engine itself).
+
+| Method | Path | Success | Errors |
+| --- | --- | --- | --- |
+| GET | `/admin/biomass/overview` | 200 live metrics (lots/listings/orders by status, disputed, adjustments, newest 10 audit rows) | 401/403 |
+| GET | `/admin/biomass/inventory` (+ `{id}`, `/{id}/detail`) | 200 global inspection incl. owner identity; `flagged` filter; detail adds movements/listings/orders | 404 |
+| POST | `/admin/biomass/inventory/{lot_id}/adjust` | 200 `admin_correction` movement (reason mandatory, audited) | 404, 422 |
+| POST | `/admin/biomass/inventory/{lot_id}/archive` / `/restore` / `/flag` | 200 (flag stores a recorded note) | 404, 409 |
+| GET | `/admin/biomass/listings` | 200 all listings | |
+| POST | `/admin/biomass/listings/{id}/reject` (reason) / `/suspend` / `/reinstate` | 200; suspend is 409 with `code: "active_requests_exist"` while orders are open (or `force: true` cancels+releases them); reinstate → `paused` | 404, 409 |
+| GET | `/admin/biomass/orders` (+ `{id}`) | 200 status filter + reference search | 404 |
+| POST | `/admin/biomass/orders/{id}/resolve-dispute` `{action: resume\|cancel, note}` | 200 dispute resolved; **cancel on a fulfilled order is refused 409** (stock has moved; resume only) | 404, 409 |
+| GET | `/admin/biomass/audit` | 200 read-only audit explorer (action/entity_type/entity_id/search, paging) — there is deliberately NO write endpoint for audit rows | 401/403 |
+
+Granting admin (operator-only bootstrap)
 
 ```sql
 UPDATE users SET role = 'admin' WHERE email = '<address>';
@@ -160,15 +222,33 @@ and without a session, logout revocation, expiry, role-escalation attempts,
 email verification (14 scenarios incl. a real double-consume race), and the
 admin panel (13 scenarios: gates, per-request role flips, pagination/search,
 deactivate + live revocation, self-protection, CSRF, no-leak 404s, OpenAPI
-paths) — 47 tests total.
+paths) plus the biomass inventory & marketplace API (18 scenarios:
+ownership 404, server-side validation, movement-journal reconciliation
+including the before/after chain, listing-over-stock 409, a real
+concurrent oversell race, exactly-once reservation release, full order
+lifecycle with the settlement record, idempotent purchase replay, 72h
+expiry release, dispute freeze, completed-not-rewritable, non-admin 403)
+and the admin biomass console + audit (9 scenarios: overview from live
+data, owner-visible inspection, reason-mandatory audited adjustment,
+flag/archive/restore, listing moderation, lot detail, audit endpoint
+GET-only, engine-level UPDATE/DELETE rejection by the append-only
+trigger) — 74 tests total.
 
 ## Known limitations (implemented vs. deferred)
 
 - Email verification was completed in Task 003 (server gate + tokens +
   mailer backends); pre-existing unverified accounts stay locked out until
   they verify or the operator runs the documented SQL.
-- Admin supervision has no audit trail yet; an admin audit log is the
-  natural follow-up (see docs/SECURITY.md).
+- Admin account-supervision actions have no audit trail of their own yet;
+  the biomass domain is audited in `biomass_audit_events` (append-only at
+  the DB level) — extending that pattern to Task 005 endpoints is the
+  natural follow-up.
+- No payment provider: order settlement is a manual, clearly-labelled
+  record only; permit references are stored as `unverified` and are never
+  claimed verified (no farm/zone/parcel models exist to validate against).
+- Geospatial (PostGIS) features: deferred — the extension is absent from
+  this PostgreSQL instance; biomass lots carry only free-text storage
+  locations, no coordinates.
 - Password reset: not implemented.
 - Rate limiting: per-process memory only — not shared across workers/instances;
   replace with a shared store (Redis) before multi-instance production.

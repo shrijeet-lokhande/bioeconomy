@@ -78,6 +78,17 @@ class Settings(BaseSettings):
     # running from backend/). Gitignored.
     mail_outbox_dir: str = ".mail_outbox"
 
+    # --- Biomass record images (1–5 compulsory uploads per lot/listing) ---
+
+    # Directory for uploaded biomass images (absolute, or relative to CWD
+    # when running from backend/). Gitignored; files keep server-generated
+    # names and are served exclusively through the authorized image
+    # endpoint — never as static files.
+    biomass_image_upload_dir: str = ".data/biomass_images"
+
+    # Per-file upload cap in MB (5 MB); at most 5 images per record.
+    biomass_image_max_mb: int = 5
+
 
 @lru_cache
 def get_settings() -> Settings:

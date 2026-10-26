@@ -4,7 +4,10 @@ import { useAuth } from "../auth/AuthContext";
 import { ROUTES, type AppRoute } from "../routes";
 
 const PROTOTYPE_NOTE =
-  "Account system connected to the real backend; listing data is local demo data, always labelled as demo.";
+  "Bioeconomy platform prototype — the account system, biomass inventory, " +
+  "marketplace workflows, and admin console run on the real backend. " +
+  "Server-enforced roles, recorded stock movements, and honest labelling " +
+  "where data is not verified.";
 
 export interface AppShellProps {
   activeRoute: AppRoute;

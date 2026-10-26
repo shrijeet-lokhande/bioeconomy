@@ -11,9 +11,10 @@ import {
   type AdminUserSummary,
 } from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
+import { AdminBiomassTab } from "./admin/AdminBiomassTab";
+import { AdminAuditTab } from "./admin/AdminAuditTab";
 
-type TabId = "overview" | "users";
-
+type TabId = "overview" | "users" | "biomass" | "audit";
 type LoadState =
   | { kind: "loading" }
   | { kind: "ready" }
@@ -254,7 +255,26 @@ export function AdminPage() {
         >
           Users
         </button>
+        <button
+          type="button"
+          className={tab === "biomass" ? "admin-tab admin-tab--active" : "admin-tab"}
+          onClick={() => setTab("biomass")}
+          aria-current={tab === "biomass" ? "true" : undefined}
+        >
+          Biomass
+        </button>
+        <button
+          type="button"
+          className={tab === "audit" ? "admin-tab admin-tab--active" : "admin-tab"}
+          onClick={() => setTab("audit")}
+          aria-current={tab === "audit" ? "true" : undefined}
+        >
+          Audit log
+        </button>
       </nav>
+
+      {tab === "biomass" ? <AdminBiomassTab /> : null}
+      {tab === "audit" ? <AdminAuditTab /> : null}
 
       {tab === "overview" ? (
         <section aria-label="Platform statistics">

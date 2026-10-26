@@ -150,7 +150,14 @@ npm run dev
 
 Vite proxies `/api` to the backend during development. Sign up at the
 Create account page, sign in, and the dashboard shows your account; the
-biomass listing workflow uses clearly-labelled local demo data.
+biomass inventory and marketplace pages run against the real backend API
+(the Overview dashboard remains a small, clearly-labelled local demo).
+
+Registering a lot or publishing a marketplace listing requires uploading
+1–5 images (JPEG/PNG/WebP, up to 5 MB each) together with the record;
+image files are stored server-side under generated names and are served
+only through the authorized image endpoint (`docs/SECURITY.md`,
+Task 007 section).
 
 Vite prints the local development URL in the terminal.
 

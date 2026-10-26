@@ -1,11 +1,11 @@
 # API Contract — Bioeconomy
 
-Status: partial. The authentication (+ email verification) slice and the
-admin supervision slice below are implemented and verified (2026-10-24,
-Tasks: secure registration/auth, Task 003 email verification, Task 005
-admin panel). Everything else in the platform (biomass listings, geospatial
-datasets, telemetry, analytics) has no API yet. Do not assume undocumented
-endpoints.
+Status: partial. The authentication (+ email verification) slice, the admin
+supervision slice, and the biomass inventory + marketplace slice below are
+implemented and verified (2026-10-26; Tasks: secure registration/auth, Task
+003 email verification, Task 005 admin panel, biomass inventory &
+marketplace). Everything else in the platform (geospatial datasets,
+telemetry, analytics) has no API yet. Do not assume undocumented endpoints.
 
 Base path: `/api/v1`
 
@@ -267,9 +267,210 @@ values → 422).
   request/log-in without any session invalidation.
 - 404 unknown user; 403 non-admin / untrusted Origin; 429 rate limit.
 
+## Biomass inventory & marketplace (implemented and verified 2026-10-26)
+
+All `/api/v1/biomass/*` endpoints require a verified session (the same 401 →
+403 `email_verification_required` order as the admin API). Every
+state-changing request also runs the shared untrusted-Origin check and the
+`biomass` rate-limit scope. Quantities are Decimal and serialize as JSON
+STRINGS (e.g. `"500.500"`, exactly 3 decimals) — never parse them as floats.
+`null` means unknown; zero is never fabricated.
+
+### Inventory
+
+- `GET /biomass/inventory` — `search`, `status_filter` (`active|archived|all`,
+  default `active`), `unit` (`kg|t|m3`), `sort`
+  (`recent|updated|quantity|price`), `period_days` (1–365), `page`,
+  `page_size`. 200 → `LotPage { summary: InventorySummary, total, page,
+  page_size, items }`. The summary aggregates per unit — quantities of
+  different units are never summed, and `low_stock_lot_ids` flags active lots
+  whose available quantity fell to ≤10% of `quantity_total`.
+- `POST /biomass/inventory` — create a lot; **`multipart/form-data`**:
+  `payload` is the LotCreateRequest JSON string (`title`, `category`,
+  `material_type`, `unit` `kg|t|m3`, `quantity` > 0, `storage_location`;
+  optional `moisture_percent` 0–100, `harvest_date`, `source_provenance`,
+  `quality_grade`, `quality_note`, `permit_reference`, `price_per_unit`,
+  `currency` ISO-4217) and `images` is 1–5 image files. An image set is
+  COMPULSORY: **a lot is never registered without at least one image** and
+  never with more than five (422); each file must be JPEG, PNG or WebP —
+  decided by magic-byte sniffing, not the client's declared type — and ≤
+  `BIOMASS_IMAGE_MAX_MB` (413 when over). Images are validated BEFORE any
+  row is written and persisted inside the creation transaction, so a
+  failed upload never leaves a half-registered lot. 201 → `LotOut`
+  (carries `images[]` with authorized `url`s). A provided
+  `permit_reference` is stored with `permit_status: "unverified"` — the
+  platform does NOT verify it.
+- `GET /biomass/inventory/{lot_id}` — 200 → `LotDetail { lot, movements }`
+  (newest-first movement journal, ≤50 rows). **404 for a lot that exists but
+  belongs to another user** (indistinguishable from nonexistent — no
+  existence oracle).
+- `PATCH /biomass/inventory/{lot_id}` — metadata-only edit. A payload that
+  contains `quantity` is rejected 422 ("record a stock adjustment instead") —
+  quantities are never silently overwritten.
+- `POST /biomass/inventory/{lot_id}/adjust` — `{ kind: addition|removal|
+  correction, quantity? , new_available? , reason (required, ≤500) }`.
+  Addition/removal mutate the balance through one appended `stock_movements`
+  row; `correction` sets the exact available quantity and records
+  before/after. 409 when a removal would exceed the available quantity or a
+  correction is a no-op. 422 when the required reason is missing.
+- `POST .../archive`, `POST .../restore` — 409 when already archived /
+  restoring an active lot... archive is refused when the lot still has
+  open marketplace listings.
+- `POST .../transfer` — `{ recipient_email, quantity, note? }`; 201 →
+  `TransferResult { source_lot, transferred_lot }`. The recipient gets a NEW
+  lot whose movement journal starts with a `transfer_in` row and whose
+  `source_provenance` traces the original; 400 for unknown/unactive
+  recipient or self-transfer.
+- `GET /biomass/inventory/export.csv` — CSV of the caller's own inventory
+  (`text/csv; charset=utf-8`, `Content-Disposition: attachment`).
+
+### Marketplace listings
+
+- `GET /biomass/marketplace/listings` — public browse (only `active`
+  listings on `active` lots). Query: `search`, `category`, `material_type`,
+  `unit`, `min_quantity`, `max_price`, `sort`
+  (`recent|price_asc|price_desc|quantity_desc`), paging. Cards expose the
+  seller's display name only — NO seller id/email on public shapes. Runs an
+  honest-availability sweep (expired reservations released) on every read.
+- `GET /biomass/marketplace/listings/{id}` — `ListingCard`; also sweeps
+  that listing's stale reservations before showing availability.
+- `POST /biomass/marketplace/listings` — **`multipart/form-data`**:
+  `payload` is the ListingCreateRequest JSON string (`{ lot_id, title,
+  quantity, price_per_unit > 0, fulfilment: pickup|delivery|negotiable,
+  publish_now, description?/location?/available_from?/available_until? }`)
+  plus the COMPULSORY 1–5 `images` files (same rules as lot creation —
+  format sniffed from bytes, per-file size cap → 413, count 1–5 → 422;
+  validated before the lot lookup so client errors surface before
+  resource checks). 201 → `ListingOwn` (carries `images[]`). Offered
+  quantity is validated against the lot's available quantity MINUS the
+  offered quantity of the lot's other live listings (drafts consume room
+  too); 409 when exceeded.
+- `GET /biomass/marketplace/my/listings?status_filter=...` — the seller's
+  management view (includes `listing_reserved`, `quantity_sold`,
+  `moderation_note`).
+- `PATCH /marketplace/listings/{id}` — seller edits; `POST
+  /marketplace/listings/{id}/publish|pause|resume|withdraw` — state
+  transitions drafted/active/paused/withdrawn (server-validated).
+- Listing states: `draft`, `active`, `paused`, `withdrawn`, `sold_out`,
+  `rejected` (admin moderation). There is no pre-publish moderation gate;
+  admins reject/suspend afterwards.
+
+### Record images
+
+- `GET /biomass/images/{image_id}` — serves ONE image's file bytes to
+  authorized viewers (requires a verified session; anonymous requests are
+  401 at the gate). **Access rules** — everything else is 404
+  (indistinguishable from a nonexistent image, no existence oracle):
+  - lot image: the lot owner (or an admin);
+  - listing image: the seller (or an admin) always; ANY verified user
+    while the listing is `active` (matches marketplace visibility).
+  Response: the sniffed media type `image/jpeg|png|webp` and the exact
+  stored bytes; inline (no `Content-Disposition: attachment`).
+- `ImageOut` shape (nested on `LotOut` / `ListingCard` / `ListingOwn` /
+  admin lot payloads): `{ id, position (1–5), original_name, content_type,
+  size_bytes, created_at, url }` where `url` is the endpoint above — there
+  are NO public static file URLs.
+- Images are immutable through the API: there is no add/remove/reorder
+  endpoint; a record's gallery is fixed at creation. Delete-orphan applies
+  only at the database level via CASCADE.
+
+### Orders (full transaction lifecycle)
+
+- `POST /biomass/marketplace/listings/{id}/orders` — body `{ quantity,
+  buyer_note?, client_request_id? }`. Creates order status `requested` and
+  atomically RESERVES stock under PostgreSQL row locks (`FOR UPDATE` on the
+  listing and the lot, revalidated inside the transaction): two concurrent
+  buyers can never reserve more than the lot has; one gets 201, the other
+  409. Sending the SAME `client_request_id` again returns the SAME order
+  with **200** instead of 201 — an idempotent retry, not a second purchase.
+  Self-purchase is 409. Order reference format: `BO-XXXXXXXX`.
+- `GET /biomass/marketplace/orders?role=buying|selling&status_filter=all|
+  open|<status>` and `GET /biomass/marketplace/orders/{id}` —
+  `OrderOut`; exposure requires being buyer or seller (otherwise 404).
+- Transitions (all server-validated against status AND role; mismatched
+  role/actor is 403 or 404, wrong state is 409):
+  - buyer `POST .../cancel` (while `requested`) releases the reservation
+    exactly once (enforced: duplicate release raises 409).
+  - seller `POST .../accept` → `awaiting_fulfilment`, or `POST
+    .../reject` → `rejected` (releases the reservation too).
+  - **reservation expiry**: `requested` orders unaccepted for 72 hours are
+    expired lazily on the next relevant read/service call — status becomes
+    `cancelled` with `released_at` set and one `release` movement appended.
+  - seller `POST .../fulfil` (from `awaiting_fulfilment`) converts
+    reserved → sold; idempotency enforced (second fulfil is 409).
+  - buyer `POST .../confirm` (from `fulfilled`) → `completed`. A completed
+    order can never be re-transitioned.
+  - buyer `POST .../dispute` `{ reason required }` from
+    `requested|awaiting_fulfilment|fulfilled` → `disputed`; the order is
+    frozen (other transitions are 409 while disputed).
+  - seller `POST .../settlement` `{ note }` — records that payment moved
+    OFF-platform (`settlement_status: "settled"`). NO payment provider is
+    configured: this is a manual, clearly-labelled record only. Buyer
+    attempt is 403; double settlement 409.
+- Admin dispute resolution: `POST /api/v1/admin/biomass/orders/{id}/
+  resolve-dispute` `{ action: resume|cancel, note required }` on
+  `disputed` orders only. For orders that were already fulfilled, `cancel`
+  is refused with 409 — stock has legally moved; only `resume` is valid.
+
+### Admin biomass console (`/api/v1/admin/biomass/*`, require_admin)
+
+- `GET /overview` — live metrics: lot/listing counts by status, order
+  counts by status, disputed count, adjustment movements, 10 newest audit
+  events. Nothing fabricated.
+- `GET /inventory` (+`/inventory/{id}`, `/inventory/{id}/detail`) — global
+  inspection including owner identity (email/name), search, `flagged`
+  filter; detail adds movements, listings, and orders for the lot.
+- `POST /inventory/{id}/adjust|archive|restore|flag` — same service rules
+  as the user API but with admin actions (`admin_correction` movement,
+  `admin.*` audit events). A reason is mandatory on adjust; flag stores a
+  recorded note.
+- `GET /listings`, `POST /listings/{id}/reject` (reason required),
+  `POST .../suspend` (409 with `code: "active_requests_exist"` while
+  purchase requests are open; `force: true` also cancels + releases those
+  orders), `POST .../reinstate` (→ `paused`, never silently re-publishes).
+- `GET /orders` (status filter + reference search), `GET /orders/{id}`,
+  `POST .../resolve-dispute` (see above). Completed orders cannot be
+  rewritten: the resolve endpoint only works on disputed rows and there is
+  no PATCH anywhere.
+- `GET /audit` — READ-ONLY audit explorer: filters `action`,
+  `entity_type` (`lot|listing|order`), `entity_id`, `search`, paging.
+  There is deliberately no endpoint that creates, updates, or deletes
+  audit rows; the database trigger `biomass_audit_append_only` refuses
+  UPDATE and DELETE at the engine level.
+
+#### Admin permanent deletion (implemented and verified 2026-10-27)
+
+- `DELETE /api/v1/admin/biomass/inventory/{lot_id}` and
+  `DELETE /api/v1/admin/biomass/listings/{listing_id}` — body
+  `{"confirm_title": "<exact record title>"}` (retype-confirmation;
+  mismatch → 400, missing field → 422). Admin-only (401 unauthenticated,
+  403 non-admin, re-checked in the service layer).
+- Deletion policy: hard-delete ONLY when no order (any status) references
+  the record (directly or, for lots, via its listings) — otherwise 409
+  `"This record is referenced by purchase transactions…"`; archive/withdraw
+  remain the options there. A lot purge removes the lot, its stock-movement
+  journal, its order-free listings, all image metadata rows, and the image
+  files on disk. A listing purge removes the listing, its image metadata,
+  and its files; the source lot is untouched.
+- Two phases: the DB purge (record + dependents + a tracking row in
+  `biomass_deletion_cleanups` listing the exact storage keys) commits
+  atomically; files are unlinked AFTER the commit by `safe_unlink`
+  (server-generated names only, contained in the upload dir, no
+  symlinks/directories, missing files count as cleaned). File failures
+  leave the tracking row `pending` — retry the same request to finish.
+- Responses: `200 {"entity_type", "entity_id", "status": "completed" |
+  "pending_cleanup", "removed_files", "missing_files", "failed_files"}` —
+  `pending_cleanup` is explicitly NOT reported as fully deleted. A repeat
+  request for a fully deleted id → 404. Duplicate/concurrent requests are
+  serialized by `SELECT … FOR UPDATE`; exactly one purge occurs.
+- Audit: appends `admin.lot.deleted` / `admin.listing.deleted` (actor,
+  title, counts) and `admin.deletion.cleanup_completed` when files finish.
+  The append-only audit log is RETAINED (never purged); it contains no
+  image contents. Backups/replicas are NOT claimed purged (see SECURITY).
+
 ## Not yet defined
 
-Biomass listing CRUD, query/sort contracts for dashboards, dataset
-provenance endpoints, IoT ingestion, analytics. When this writer documents a
-planned-but-unbuilt contract, it must be clearly marked as a draft until the
-implementation and its tests exist.
+Geospatial dataset provenance endpoints, IoT ingestion, analytics
+(biomass inventory + marketplace are now implemented above). When this
+writer documents a planned-but-unbuilt contract, it must be clearly marked
+as a draft until the implementation and its tests exist.

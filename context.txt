@@ -1,11 +1,19 @@
 PROJECT CONTEXT — Bioeconomy
-Last updated: 2026-10-24 (Task 005 COMPLETE — admin panel implemented and
-live: server-enforced /api/v1/admin/* with role=="admin" gate ordered AFTER
-auth (401) and email-verification (403) gates; bootstrap SQL promoted
-shrijeet733@gmail.com to verified + admin; tests 47 pytest / 69 Vitest;
-see section 8 for final state. Previous checkpoints: Task 003 secure email
-verification (33 pytest / 64 Vitest, one REAL Resend delivery); Task 001
-frontend foundation; Task 002 demo dashboard/biomass listings;
+Last updated: 2026-10-27 (Admin permanent record deletion COMPLETE:
+DELETE /api/v1/admin/biomass/inventory|listings/{id} with admin-only
+auth, exact-title confirmation, order-history refusal, two-phase purge +
+biomass_deletion_cleanups tracking via migration b4d7e91c2a55; tests 93
+pytest / 115 Vitest; see section 11 for final state. Task 007 COMPLETE —
+compulsory 1–5 record
+images: biomass_images table via migration f1c49d83a2b0; lot + listing
+creation are multipart with validated, transaction-bound image galleries;
+authorized /biomass/images/{id} serving with owner/seller/admin/active
+rules; magic-byte sniffing, server-generated filenames. Task 006
+completed 2026-10-26:
+biomass inventory & marketplace, full order lifecycle, admin console + audit.
+Previous checkpoints: Task 005 admin panel (47 pytest / 69 Vitest); Task 003
+secure email verification (33 pytest / 64 Vitest, one REAL Resend delivery);
+Task 001 frontend foundation; Task 002 demo dashboard/biomass listings;
 Authentication task — registration/login with PostgreSQL sessions.)
 Source of brief: bioeconomy/README.md + user's task briefs. Resend API key
 (send-only, restricted) lives in backend/.env ONLY; user was advised to
@@ -28,10 +36,14 @@ rotate it since it passed through chat history.
 ======================================================================
 - FRONTEND (working): React 19 + TS 5.9 + Vite 7 — auth pages +
   protected routes now talk to the REAL backend session API via
-  /api (Vite dev proxy). Demo listing store: still localStorage.
-- BACKEND (working, auth slice): FastAPI 0.162 at
+  /api (Vite dev proxy). Biomass inventory + marketplace pages talk to
+  the real biomass API; the localStorage demo remains only for the
+  clearly-labelled Overview dashboard.
+- BACKEND (working): FastAPI 0.162 at
   backend/src/backend/main.py (`backend.main:app`), sync SQLAlchemy
-  2.1 + psycopg 3, PostgreSQL 18.6 at localhost:5432.
+  2.1 + psycopg 3, PostgreSQL 18.6 at localhost:5432. Slices live:
+  auth, email verification, admin supervision, biomass inventory +
+  marketplace + admin biomass console.
 - TARGET (not built yet): Leaflet maps (PostGIS NOT available on this
   PostgreSQL instance — the extension is absent from the cluster),
   ESP32 telemetry, analytics/AI.
@@ -339,7 +351,345 @@ docs/DATABASE.md (bootstrap), backend/README.md, docs/CURRENT_STATE.md.
   tests + curl only.
 
 ======================================================================
-9. COMMANDS (verified)
+9. TASK 006 — BIOMASS INVENTORY & MARKETPLACE (FINAL STATE: IMPLEMENTED + LIVE)
+======================================================================
+Status: DONE. Migration applied to the dev DB; tests green; backend and
+frontend wired to the REAL API (the inventory page no longer reads the
+localStorage demo store). Details in docs/API_CONTRACT.md (new section),
+docs/SECURITY.md, docs/DATABASE.md, backend/README.md, docs/CURRENT_STATE.md.
+
+9.1 DATA MODEL (migration 5c1f2a9d7b40; non-destructive, applied)
+- biomass_lots: owner FK RESTRICT, unit kg|t|m3 CHECK, running counters
+  total/available/reserved/sold/transferred/removed (all >=0 CHECK),
+  permit_status IN not_provided|unverified, status active|archived,
+  admin_flag, NUMERIC price/currency.
+- biomass_listings: per-lot offer with own
+  listing_available/listing_reserved/quantity_sold; status draft|active|
+  paused|withdrawn|sold_out|rejected; fulfilment pickup|delivery|
+  negotiable. DRAFTS consume offer room (conservative; publish-time
+  revalidation too — test asserts draft-consumption).
+- biomass_orders: reference BO-XXXXXXXX UNIQUE; client_request_id UNIQUE
+  (idempotent replay = SAME order, 200 not 201); status requested|
+  awaiting_fulfilment|fulfilled|completed|cancelled|rejected|disputed;
+  reservation_expires_at (72h, released lazily on reads); per-transition
+  timestamps; dispute_previous_status for resume; settlement_status
+  pending|settled + manual note (NO payment provider — clearly labelled).
+- stock_movements: APPEND-ONLY journal per lot (initial|addition|removal|
+  correction|reservation|release|sale|transfer_out|transfer_in|
+  admin_correction) with quantity_delta + before/after — counters are
+  never overwritten directly, all change traceable.
+- biomass_audit_events: actor/action/entity JSONB detail; append-only
+  ENFORCED BY THE DATABASE (trigger biomass_audit_append_only raises on
+  UPDATE/DELETE — tested by executing both directly).
+- All quantities NUMERIC(14,3), prices NUMERIC(14,2), serialized as JSON
+  STRINGS; no cross-unit aggregation anywhere.
+
+9.2 BACKEND
+- services/biomass.py: lifecycle core. Balance changes append movements
+  in the SAME transaction; reservations/fulfilment use SELECT ... FOR
+  UPDATE on listing+lot with in-transaction revalidation (real
+  concurrent oversell test passes: one 201, one 409); exactly-once
+  release (duplicate release 409); expired reservations released lazily;
+  completed orders terminal (no endpoint rewrites them).
+- api/biomass.py (user, verified session required): inventory list/create/
+  detail/PATCH/adjust/archive/restore/transfer/export.csv; marketplace
+  browse+detail (public cards show seller DISPLAY NAME only — no id/
+  email), my/listings + publish/pause/resume/withdraw; orders create
+  (client_request_id auto-injected by frontend with randomRequestId())
+  + role-correct cancel/accept/reject/fulfil/confirm/dispute/settlement.
+  PATCH with a "quantity" key = 422 ("record a stock adjustment
+  instead"). Non-owner detail read = 404 same-as-missing (no existence
+  oracle). Mutations run Origin 403 check + rate-limit scope "biomass".
+- api/admin_biomass.py (require_admin, role re-read per request):
+  overview metrics from live data; global inventory inspection (owner
+  identity visible to admins) + lot detail (movements/listings/orders);
+  adjust (admin_correction movement, reason MANDATORY, audited)/archive/
+  restore/flag (note recorded); listings reject (reason)/suspend (409
+  code "active_requests_exist" while open orders; force cancels+releases
+  them)/reinstate (→ paused, never silently republished); orders list
+  (reference search) + resolve-dispute {action: resume|cancel, note} —
+  cancel on a FULFILLED order is 409 (stock moved); READ-ONLY audit
+  explorer (action/entity/entity_id/search/paging; NO write endpoint).
+- Migration chain: 8a2056eb9760 → 3dd348b84f8a → 5c1f2a9d7b40.
+- CORS still ["GET","POST","PATCH"]; no DELETE/PUT in the biomass API.
+
+9.3 FRONTEND
+- lib/api.ts: biomassApi + adminBiomassApi typed clients; quantities as
+  strings in types; qs() helper; randomRequestId() into order creation;
+  exportCsv().
+- BiomassInventoryPage.tsx REWRITTEN against the real API (demo store
+  removed from this page): summary cards, low-stock strip (<=10%
+  available of total), search/status/unit/sort/pager, CSV export, lot
+  create form, lot manager (adjustment w/ mandatory reason + submit
+  disabled while empty, transfer w/ recipient email, publish to
+  marketplace incl. draft/publish_now), movement journal per lot.
+- MarketplacePage.tsx NEW: Browse / Purchases / Sales / My listings
+  tabs; purchase dialog shows the idempotency behavior honestly; order
+  actions per role AND status with honest wording (72h reservation,
+  "settlement records payment that moved off-platform").
+- Admin page + Biomass tab (pages/admin/AdminBiomassTab.tsx: metrics,
+  inspection, adjust dialog, flag, listing moderation, resolve-dispute
+  dialog whose text states the server rule generally — frontend cannot
+  see dispute_previous_status) and Audit tab (AdminAuditTab.tsx: filters,
+  JSON detail expansion, strictly no write affordance).
+- routes.ts adds "marketplace" to the nav; AppShell footer no longer
+  claims demo data for the real pages.
+- Demo artifacts (OverviewPage dashboard, data/listingStore.ts,
+  domain/demoData.ts, DemoBanner, ListingForm) intentionally remain for
+  the clearly-labelled OVERVIEW demo only.
+
+9.4 TESTS (all green, no mock data in the shipped path)
+- Backend 74 total: 18 user biomass scenarios (ownership 404
+  indistinguishable from missing; 422 quantity-overwrite rule; movement
+  reconcile sums deltas + chain before/after; listing over available
+  room incl. draft consumption 409; real concurrent oversell via
+  threads; cancel releases exactly once; full lifecycle request→accept→
+  fulfil→confirm→completed + settlement record; idempotent replay same
+  order; expiry release appends release movement; dispute freezes
+  transitions; admin cannot cancel fulfilled dispute 409; completed not
+  rewritable; non-admin 403) + 9 admin scenarios (overview, inspection
+  w/ owner, adjust reason mandatory + audited, flag/archive/restore,
+  reject/suspend-force/reinstate, lot detail, audit GET-only via
+  app.openapi()["paths"] — do NOT introspect app.routes, FastAPI nests
+  routers as _IncludedRouter; DB-level UPDATE/DELETE trigger rejection).
+- Frontend 83 total: BiomassFlow (5) + MarketplaceFlow (4) +
+  AdminBiomassFlow (5) mirror the stub-fetch pattern (strip query
+  strings; /auth/me stubbed first; Dialog paragraphs asserted via
+  closest("section").textContent because TestingLibrary exact-matching
+  fails across sibling text nodes). tsc -b clean; npm run build OK.
+- Test conftest keeps isolating bioeconomy_test_<hex> DBs (created via
+  migration chain, dropped after; dev DB bioeconomy untouched;
+  RATE_LIMIT_ENABLED=0).
+
+9.5 HONESTY POSTURE (never claimed; enforced by tests/UI)
+- Settlement is a MANUAL record — no money is captured anywhere.
+- Permit references stored unverified; nothing claims validation.
+- Public marketplace cards leak no seller identity beyond display name;
+  detail 404s hide existence from non-owners.
+- Audit rows can only be INSERTED (DB trigger); the API has no
+  create/update/delete path for audit.
+
+9.6 SECOND-SESSION REVIEW PASS (2026-10-27, verification + completion)
+- Full ground-truth run: 74/74 pytest (isolated bioeconomy_test_<hex> DB),
+  83/83 Vitest, `tsc -b` clean, `npm run build` OK (322.71 kB / gzip
+  92.35 kB). Dev DB confirmed at migration head 5c1f2a9d7b40 with 0
+  biomass rows (no fabricated data shipped). append-only trigger verified
+  present on the dev DB.
+- Live smoke: uvicorn booted on 127.0.0.1:49173; /api/v1/health ok;
+  /openapi.json lists all 40 biomass paths (28 user + 12 admin).
+- FIXED in services/biomass.py: get_order_for_participant_or_404 returned
+  None instead of raising 404 when an admin-role session requested a
+  nonexistent order under the USER router (crash → 500). Now the
+  nonexistent case always 404s; admins pass only for orders that exist.
+  No new dependencies, endpoints, or migrations were added by this pass.
+
+======================================================================
+10. TASK 007 — COMPULSORY 1–5 RECORD IMAGES (FINAL STATE: IMPLEMENTED + LIVE)
+======================================================================
+Status: DONE. Migration f1c49d83a2b0 applied to the dev DB; 79 pytest /
+110 Vitest green; tsc -b clean; npm run build OK. Registering a lot and
+publishing a listing each REQUIRE 1–5 images, uploaded in the SAME
+multipart request as the record — a record can never exist without its
+gallery. Details in docs/API_CONTRACT.md (Record images section),
+docs/SECURITY.md (Task 007 section), docs/DATABASE.md, docs/CURRENT_STATE.md,
+backend/README.md + backend/.env.example.
+
+10.1 DATA MODEL (migration f1c49d83a2b0; non-destructive, applied)
+- biomass_images: id UUID PK; lot_id XOR listing_id (CHECK
+  "(lot_id IS NULL) <> (listing_id IS NULL)"; FKs ON DELETE CASCADE);
+  position 1..5 CHECK + UNIQUE(lot_id, position) + UNIQUE(listing_id,
+  position); stored_name UNIQUE (uuid hex + sniffed extension — a
+  CLIENT-SUPPLIED NAME NEVER TOUCHES DISK); original_name (sanitized
+  basename, display only); content_type IN image/jpeg|png|webp CHECK;
+  size_bytes > 0 CHECK; created_at. Index (listing_id, position).
+  File bytes live on disk in BIOMASS_IMAGE_UPLOAD_DIR (default
+  backend/.data/biomass_images, gitignored).
+- The 1–5 COUNT rule is service-layer (row counts are not SQL
+  constraints); position bounds ARE DB constraints.
+- Chain: 8a2056eb9760 -> 3dd348b84f8a -> 5c1f2a9d7b40 -> f1c49d83a2b0.
+
+10.2 BACKEND
+- services/biomass_images.py: validate_images() runs BEFORE any record
+  write — count 1..5: 422; magic-byte sniff (JPEG FF D8 FF / PNG
+  89 50 4E 47 0D 0A 1A 0A / WebP RIFF....WEBP) decides the REAL type —
+  declared MIME + filename UNTRUSTED (renamed text: 422; extension
+  contradicting the bytes: 422); per-file cap BIOMASS_IMAGE_MAX_MB:
+  413; empty file: 422. persist_images() writes files + queues rows
+  inside the caller's OPEN transaction (a mid-transaction crash can
+  orphan a FILE — harmless; a ROW WITHOUT A FILE is impossible by
+  ordering).
+- services/biomass.py: create_lot(images=...) / create_listing(...,
+  images=...) — listing image validation runs FIRST, before even the
+  lot lookup (unknown-lot 404 preserved via _lock_lot afterwards);
+  the gallery is persisted INSIDE the creation transaction;
+  lot.created/listing.created audit details carry the image count.
+  Transfer-created lots carry NO images (not a registration).
+- api/biomass.py: POST /biomass/inventory and
+  POST /biomass/marketplace/listings are multipart/form-data —
+  `payload` (JSON string, revalidated by _parse_payload: 422) +
+  `images` (list[UploadFile] | None). GET /biomass/images/{image_id}:
+  lot images -> owner or admin; listing images -> seller/admin always,
+  ANY verified user while the listing is active; everything else 404
+  (no oracle), anonymous 401 at the gate; serves the SNIFFED media
+  type; file missing from storage -> honest 404. ImageOut (computed
+  url /api/v1/biomass/images/{id}) nests on LotOut/ListingCard/
+  ListingOwn (AdminLotOut inherits); inventory + listing list queries
+  selectinload image rows.
+- BiomassImage.lot/.listing are viewonly=True (kills the SAWarning
+  cascade conflict with the parent-side cascade images relationships).
+- Env: BIOMASS_IMAGE_UPLOAD_DIR (default .data/biomass_images),
+  BIOMASS_IMAGE_MAX_MB (default 5) — documented in
+  backend/.env.example; .gitignore gains backend/.data/.
+
+10.3 FRONTEND
+- lib/api.ts: BiomassImage type; IMAGE_RULES (min 1, max 5, 5 MB,
+  JPEG/PNG/WebP) + IMAGE_UPLOAD_HINT; multipartPayload(); createLot/
+  createListing(payload, files) POST FormData (NO client Content-Type
+  header — the browser sets the boundary); images?: BiomassImage[] on
+  lot/card/own types (legacy records may have none).
+- domain/imageValidation.ts: pure client MIRROR of the server rules —
+  sniffImageType from magic bytes (renamed text rejected client-side
+  too), validateImageFiles (slot count, size cap, extension/MIME,
+  specific messages), imageCountError for the submit-time compulsory
+  rule.
+- components/ImageUploadField.tsx: shared field for BOTH creation
+  forms — picker button, drag-and-drop, previews (object URLs revoked
+  eagerly), live "n/5 images uploaded", per-file errors, removal, hard
+  stop at 5, disabled while busy.
+- components/RecordImage.tsx: RecordThumb (primary image on browse
+  cards/rows; honest "—" placeholder for legacy records without
+  images) and RecordGallery (detail views, thumb navigation,
+  broken-image fallback). Sources hit the AUTHORIZED endpoint, so the
+  session decides visibility; there are no public file URLs.
+- pages/BiomassInventoryPage.tsx: lot form + "List on marketplace"
+  form each carry an ImageUploadField; submit is blocked until >=1
+  image (imageCountError gate + disabled button); server errors
+  surface without losing input; the lot manager shows the gallery.
+- pages/MarketplacePage.tsx: browse cards + my-listings rows show the
+  primary image; the purchase dialog shows the listing gallery.
+
+10.4 TESTS (all green)
+- Backend 79 (was 74; +5): compulsory >=1 for lot AND listing with
+  NOTHING half-registered after failures; 6 images -> 422; a
+  five-image lot yields positions 1..5 + authorized urls; text
+  disguised as png and extension-mismatch: 422; oversize: 413; listing
+  with 2 images 201 + browse card carries them; image access rules
+  (stranger: 200 on an ACTIVE listing's image with byte-exact body +
+  sniffed content-type, 404 on lot images, 401 anonymous);
+  admin/owner/paused-listing access (sa_update role promotion
+  pattern). Multipart helpers live in test_biomass_api.py
+  (image_files/post_record/create_lot/open_listing; shared with
+  test_biomass_admin imports); PNG_1X1 1x1-PNG fixture. conftest
+  isolates uploads into tempfile.mkdtemp via BIOMASS_IMAGE_UPLOAD_DIR
+  + BIOMASS_IMAGE_MAX_MB=5 set BEFORE backend import (get_settings is
+  lru_cached).
+- Frontend 110 (was 83): new src/domain/imageValidation.test.ts (15)
+  and src/components/ImageUploadField.test.tsx (7); BiomassFlow
+  asserts blocked-submit-without-images (0/5, disabled button, no
+  POST), the multipart create body (payload JSON + image), server-422
+  surfacing without input loss, and publish-listing-with-mandatory-
+  images (jsdom enforces NATIVE required validation — fill the price
+  field too). Gotchas recorded: user-event upload applies the input
+  `accept` filter (use a disguised image/png MIME for sniff-failure
+  tests); getByLabelText resolves the input via aria-labelledby
+  "Upload Images *", NOT the sibling <label class="btn"> "Choose
+  images" (TL would throw non-labellable). tsc -b clean; build OK.
+
+10.5 HONESTY POSTURE
+- Client-side image checks are pure usability; the SERVER re-validates
+  count/bytes/size (tests enforce the server rules independently).
+- Legacy records without images render honest placeholders; the
+  compulsory rule applies to NEW records only (documented everywhere).
+- Images are immutable through the API: no add/remove/reorder
+  endpoints; galleries are fixed at creation.
+- New config surface: two env vars only; no new dependencies (both
+  validators read the same magic signatures).
+
+======================================================================
+11. ADMIN PERMANENT RECORD DELETION (2026-10-27: IMPLEMENTED + LIVE)
+======================================================================
+Status: DONE. Migration b4d7e91c2a55 (biomass_deletion_cleanups) applied
+to the dev DB; 93 pytest / 115 Vitest green; tsc -b clean; build OK.
+Admins can permanently delete biomass inventory lots and marketplace
+listings — DB rows, exclusively-owned dependents, image metadata, and the
+image files on disk — with full lifecycle tests. Details in
+docs/API_CONTRACT.md (Admin permanent deletion), docs/SECURITY.md,
+docs/DATABASE.md, docs/CURRENT_STATE.md.
+
+11.1 DATA MODEL (migration b4d7e91c2a55; non-destructive, applied)
+- biomass_deletion_cleanups: id UUID PK; entity_type IN {lot, listing}
+  CHECK; entity_id UUID; UNIQUE(entity_type, entity_id); storage_keys
+  JSONB (exact server-generated stored_names collected from DB metadata
+  BEFORE the purge); status IN {pending, completed} CHECK; attempts /
+  removed_files / missing_files / failed_files counters; created_at /
+  updated_at. Downgrade drops only this table.
+- Chain: 8a2056eb9760 -> 3dd348b84f8a -> 5c1f2a9d7b40 -> f1c49d83a2b0
+  -> b4d7e91c2a55.
+
+11.2 BACKEND
+- services/purge.py (NEW): purge_lot / purge_listing. Rules:
+  (a) admin re-check in the service (defense in depth; endpoint already
+  sits behind require_admin);
+  (b) EXPLICIT confirmation — body {"confirm_title"} must equal the
+  record title after trimming (mismatch 400; missing 422);
+  (c) ANY order reference (any status incl. cancelled), directly or via
+  the lot's listings → 409 "referenced by purchase transactions" —
+  transaction history is never destroyed (archive/withdraw instead);
+  (d) ONE atomic DB transaction: delete image rows, movements, order-
+  free listings, the record, and INSERT the cleanup tracking row;
+  SELECT ... FOR UPDATE on the record serializes duplicates;
+  (e) files unlinked AFTER the commit via img_svc.safe_unlink /
+  cleanup_files — idempotent, missing files count as cleaned;
+  (f) any refused/failed key leaves status pending and the response
+  {"status": "pending_cleanup", "failed_files": n} (HTTP 200 — never
+  claims full deletion); repeat DELETE finishes pending cleanup;
+  fully-deleted id → 404.
+- services/biomass_images.py: safe_unlink (regex ^[0-9a-f]{32}\.(jpg|
+  png|webp)$; resolved-path containment in upload dir; symlink refusal;
+  directory refusal; missing → "missing") + cleanup_files.
+- api/admin_biomass.py: DELETE /api/v1/admin/biomass/inventory/{id} and
+  DELETE /api/v1/admin/biomass/listings/{id} (thin; origin check + rate
+  limit like every admin mutation).
+- services/audit.py: actions admin.lot.deleted / admin.listing.deleted
+  (actor, title, counts — NO image contents) +
+  admin.deletion.cleanup_completed. Append-only log rows are DELIBERATELY
+  RETAINED (DB trigger) — they are the security record.
+- biomass_schemas.py: AdminDeletionRequest / AdminDeletionResult.
+
+11.3 FRONTEND
+- lib/api.ts: "DELETE" method; AdminDeletionResult; adminBiomassApi.
+  purgeLot / purgeListing.
+- pages/admin/AdminBiomassTab.tsx: "Delete permanently" (btn--danger) on
+  lot + listing rows; PurgeDialog shows title + ID, warns irreversible,
+  requires retyping the exact title; disabled while busy; success note /
+  pending-cleanup warn (new .form-warn tone) / failure error; in-place
+  list refresh (no page reload). run() helper extended to result-derived
+  feedback tones.
+- index.css: .form-warn (earth palette) added next to .form-note.
+
+11.4 TESTS (all green, measured)
+- backend tests/test_admin_purge.py (14): lot purge removes rows + files
+  + movements; listing purge leaves the lot intact; 403 non-admin; 401
+  anonymous; 404 unknown; unrelated records/files intact; traversal/
+  symlink/directory keys refused (unit-level); missing files idempotent;
+  interrupted purge (monkeypatched cleanup failure) retries to
+  completed; storage refusal → pending_cleanup, never false success;
+  sequential + threaded concurrent duplicates (one purge, ONE cleanup
+  row); order-referenced 409 (incl. cancelled orders) with everything
+  intact; wrong confirmation 400/422; minimal audit events (no image
+  bytes, < 400 chars).
+- frontend AdminBiomassFlow.test.tsx (+5): retype-gating (no DELETE
+  until exact match; title + ID shown), lot success with in-place
+  refresh, listing success, 409 refusal surfaced + record still listed,
+  pending-cleanup wording without "Permanently deleted".
+
+11.5 HONESTY POSTURE
+- Audit rows, and only audit rows, are retained after a purge.
+- Backups/snapshots/replicas/journals are NOT purged and never claimed.
+- DB rows vanish atomically; files follow post-commit; failures are
+  retryable and honestly reported (pending_cleanup).
+
+12. COMMANDS (verified)
 ======================================================================
 Backend:  cd backend && cp .env.example .env (edit URL) && uv sync
           && uv run alembic upgrade head
@@ -347,14 +697,14 @@ Backend:  cd backend && cp .env.example .env (edit URL) && uv sync
           (App NEVER creates tables — migrations only.)
 Frontend: cd frontend && npm install && npm run dev (restart required
           to pick up the /api proxy).
-Tests:    backend: uv run pytest (47 tests; per-run isolated
+Tests:    backend: uv run pytest (93 tests; per-run isolated
           bioeconomy_test_<hex> DB; migrated via chain; dropped after;
-          dev DB never touched). frontend: npm run test (69 tests).
+          dev DB never touched). frontend: npm run test (115 tests).
 DB start (this machine, no Docker): sudo systemctl + native install
           steps recorded in backend/README.md.
 
 ======================================================================
-10. KNOWN ISSUES / FOLLOW-UPS
+13. KNOWN ISSUES / FOLLOW-UPS
 ======================================================================
 - RESOLVE BY USER: verify a domain at resend.com/domains to allow
   deliveries to arbitrary recipients; then set MAIL_FROM_ADDRESS to
@@ -378,11 +728,31 @@ DB start (this machine, no Docker): sudo systemctl + native install
 - Nested backend repo (owner decision pending; zero commits). Never
   `git add .` at root.
 - Security limitations (docs/SECURITY.md): process-local rate
-  limiting, no password reset, NO ADMIN AUDIT TRAIL yet (admin_audit_log
-  is the natural next hardening), not production-hardened.
-- Admin panel scope supervision = users/sessions/verification state only;
-  listings remain the localStorage demo with NO admin view of them
-  (deliberate; no fake supervision of unbuilt entity endpoints).
+  limiting, no password reset, account-supervision endpoints still lack
+  their own audit trail (biomass HAS one — biomass_audit_events,
+  append-only at the DB level; extending it to Task 005 endpoints is
+  the natural next hardening), not production-hardened.
+- Biomass limitations (Task 006, honest): NO payment provider —
+  settlement is a manual record only; permit references stored as
+  unverified (no zone/farm/parcel models to validate against); no
+  coordinates on lots (storage_location is free text) pending the
+  PostGIS decision; reservation expiry is LAZY (released on the next
+  relevant read/service call, not a background scheduler).
+- Biomass image limitations (Task 007, honest): image files are served
+  from the app process's local disk (single-node assumption; object
+  storage/CDN is the future work); a mid-transaction crash can leave an
+  orphan FILE on disk (harmless; never a row without a file); a
+  compromised DB dump exposes no image bytes (they are not in the DB),
+  but anyone with shell access to the upload dir can read the files
+  (fine for the current single-server deployment); galleries are
+  immutable (no add/remove/reorder endpoint; delete follows the record
+  via CASCADE); there is no image deletion/rotation of individual
+  files.
+- Task 006 adds REAL admin supervision of biomass lots/listings/orders +
+  a read-only audit explorer; the localStorage demo (OverviewPage +
+  data/listingStore.ts + domain/demoData.ts) remains ONLY as the
+  clearly-labelled Overview dashboard demo, separate from the real
+  biomass pages.
 - PostGIS absent from this cluster (Phase 4 decision later).
 - uv package script `backend = backend:main` untouched (placeholder
   print in __init__.py; harmless).

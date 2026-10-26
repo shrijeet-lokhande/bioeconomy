@@ -12,6 +12,7 @@ process-local behavior; pattern limits are small and would break suites).
 
 import os
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -26,6 +27,13 @@ from sqlalchemy.orm import sessionmaker
 # read these environment variables at instantiation time.
 os.environ.setdefault("RATE_LIMIT_ENABLED", "0")
 os.environ.setdefault("COOKIE_SECURE", "0")
+# Image files land in a throwaway temp directory during tests — never in
+# the working tree's .data/ directory.
+os.environ.setdefault(
+    "BIOMASS_IMAGE_UPLOAD_DIR",
+    tempfile.mkdtemp(prefix="bioeconomy_test_images_"),
+)
+os.environ.setdefault("BIOMASS_IMAGE_MAX_MB", "5")
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 

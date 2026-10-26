@@ -7,7 +7,9 @@ import { RegisterPage } from "./pages/RegisterPage";
 import { VerificationPendingPage } from "./pages/VerificationPendingPage";
 import { VerifyEmailPage } from "./pages/VerifyEmailPage";
 import { AdminPage } from "./pages/AdminPage";
+import { MarketplacePage } from "./pages/MarketplacePage";
 import { useAuth } from "./auth/AuthContext";
+import { BiomassInventoryPage } from "./pages/BiomassInventoryPage";
 import {
   findRoute,
   routeIdFromLocation,
@@ -18,6 +20,10 @@ function renderPage(routeId: RouteId): ReactNode {
   switch (routeId) {
     case "overview":
       return <OverviewPage />;
+    case "biomass-inventory":
+      return <BiomassInventoryPage />;
+    case "marketplace":
+      return <MarketplacePage />;
     case "login":
       return <LoginPage />;
     case "register":
