@@ -60,7 +60,7 @@ def build_verification_email(
     configured base URL by the caller (who owns APP_BASE_URL). This function
     embeds it verbatim into the bodies."""
     name = context.full_name or "there"
-    subject = "Verify your Bioeconomy email address"
+    subject = "Verify email for bioeconomy"
     expiry_note = (
         f"This link expires in {context.expires_in_minutes} minutes and can be "
         "used only once. If it has expired, request a new email from the "
