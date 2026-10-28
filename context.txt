@@ -756,3 +756,158 @@ DB start (this machine, no Docker): sudo systemctl + native install
 - PostGIS absent from this cluster (Phase 4 decision later).
 - uv package script `backend = backend:main` untouched (placeholder
   print in __init__.py; harmless).
+
+======================================================================
+14. WINDOWS HOSTING AND CLOUDFLARE TUNNEL CONFIGURATION (2026-10-28)
+======================================================================
+Status: IMPLEMENTED AND VERIFIED LOCALLY AND THROUGH A TEMPORARY PUBLIC
+QUICK TUNNEL. The public test tunnel was stopped after validation; its
+random trycloudflare.com hostname is expired and is not recorded here.
+
+14.1 VERIFIED ENVIRONMENT AND REQUEST FLOW
+- Windows development checkout: C:\Users\shrij\Documents\GitHub\bioeconomy.
+- Node v24.22.1, pnpm 11.25.0, uv 0.13.6, cloudflared 2026.10.5.
+  npm is not present in the current Codex shell, but `npm run dev` remains
+  a supported command in a regular Node.js installation. pnpm is available
+  and was used for the checks below.
+- PostgreSQL Windows service bioeconomy-postgresql-17 is running on port
+  5432. Local frontend: 127.0.0.1:5173. Local FastAPI: 127.0.0.1:49173.
+  PostgreSQL is not routed through the tunnel.
+- Flow: browser HTTPS -> Cloudflare Quick Tunnel -> Vite on loopback:5173
+  -> Vite /api proxy -> FastAPI on loopback:49173 -> PostgreSQL on 5432.
+- Frontend requests remain relative (/api/...). Vite binds IPv4 loopback,
+  uses strictPort, and proxies /api to http://127.0.0.1:49173.
+
+14.2 TUNNEL MODEL AND STARTUP
+- Deployment model: Quick Tunnel for development, because no Cloudflare
+  account authentication, managed domain, or stable hostname was supplied.
+  No named tunnel, DNS route, tunnel token, or credential file was created.
+- Install status: Cloudflare.cloudflared 2026.10.5 installed per-user with
+  winget from Cloudflare's official release asset; installer hash verified.
+  The install modified the user PATH. A shell opened before installation
+  may need to be restarted; scripts also check the per-user WinGet path.
+  Official download instructions:
+  https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+- Local-only: from frontend, `npm run dev` (or `pnpm run dev`). This starts
+  concurrently and does not invoke cloudflared. The backend runner resolves
+  uv from PATH or standard Windows per-user install locations.
+- Public development: from frontend, `npm run dev:tunnel` (or
+  `pnpm run dev:tunnel`), or launch the root shortcut `Start Bioeconomy
+  Public.bat`. The root shortcut calls `start-project.ps1 -Tunnel`, so it
+  also starts PostgreSQL, applies migrations, and ensures frontend deps
+  before launching the tunnel mode. It starts a temporary Quick Tunnel to
+  http://127.0.0.1:5173, obtains its generated HTTPS URL, then starts the
+  same backend+frontend command as local development. It checks the local
+  frontend, local backend health endpoint, and public API health route.
+  Ctrl+C stops the managed server process tree and cloudflared. It refuses
+  occupied app ports rather than killing processes it does not own.
+- Each run generates a different https://<random-name>.trycloudflare.com
+  URL; it stops working after cloudflared exits. There is no router port
+  forwarding, auto-start service, or machine startup task.
+- Optional Cloudflare email gate: set BIOECONOMY_TUNNEL_ALLOWED_MAIL to
+  an allowed email before `npm run dev:tunnel`. The script passes it to
+  Quick Tunnel's --allowed-mail option. Without it, anyone with the URL can
+  reach the dev site; application authorization still protects API actions.
+  Quick Tunnel documentation: https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/
+
+14.3 PUBLIC HOST, AUTH AND EMAIL LINKS
+- On public startup, the script sets VITE's
+  __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS to the exact generated hostname;
+  Vite's general allowedHosts=true is not used. Vite local-only requests
+  keep the normal localhost/127.0.0.1 allowance.
+- The backend receives CORS_ORIGINS with the two local origins and only the
+  current public origin, APP_BASE_URL set to that HTTPS origin, and
+  COOKIE_SECURE=1. SameSite remains lax. This lets browser POST requests
+  pass the existing origin check and keeps session cookies secure over
+  HTTPS. These environment values are restored when the launcher exits.
+- Email verification and password-reset links use the current public URL
+  while public mode is running. Local mode continues to use the configured
+  APP_BASE_URL in backend/.env (normally http://localhost:5173).
+- `backend/.env` remains gitignored. `.gitignore` now also ignores a
+  repository-local `.cloudflared/` directory for any future local tunnel
+  config/credentials. No credentials are stored in the repo or context.txt.
+
+14.4 FILES ADDED OR CHANGED
+- frontend/package.json: Windows-safe backend process runner for `dev`,
+  plus the optional `dev:tunnel` command; concurrently still manages both
+  backend and frontend and kills peers on failure.
+- frontend/vite.config.ts: explicit 127.0.0.1 bind, strictPort, and the
+  exact generated tunnel hostname added by Vite's supported environment
+  variable.
+- scripts/run-backend-dev.ps1: resolves uv on Windows and runs uvicorn on
+  127.0.0.1:49173.
+- scripts/start-dev-tunnel.ps1: tunnel URL discovery, environment setup,
+  safe port conflict handling, local/public readiness checks, tunnel exit
+  monitoring, and Ctrl+C process cleanup.
+- Start Bioeconomy Public.bat: optional Windows shortcut.
+- .gitignore: ignores only the project-local .cloudflared/ directory.
+
+14.5 SECURITY AND LIMITATIONS
+- Quick Tunnel is for development/testing, offers no stable URL or uptime
+  guarantee, and a URL alone is not access control. By default, anyone with
+  the URL can load the Vite development site and development source/code;
+  protected application routes still require normal application auth.
+  Use BIOECONOMY_TUNNEL_ALLOWED_MAIL for Cloudflare email gating, and do not
+  run public mode with sensitive real user data. Vite dev mode is not a
+  production deployment. Consider Cloudflare Access for a named tunnel.
+- FastAPI and PostgreSQL remain bound to loopback/local machine; only Vite
+  is the tunnel origin. Existing backend auth/admin checks and CORS/Origin
+  protections remain enabled. This does not harden the app for production.
+- Stable hostname still requires a domain controlled in Cloudflare and
+  account access: authenticate with `cloudflared tunnel login`, create a
+  named tunnel, route the chosen hostname with `cloudflared tunnel route
+  dns`, and configure the public hostname to the verified local Vite port.
+  Do not put the generated tunnel token or credentials in the repository.
+
+14.6 CHECKS RUN AND RESULTS
+- `node --version`: v24.22.1; pnpm --version: 11.25.0; `uv --version`:
+  0.13.6; `cloudflared --version`: 2026.10.5 (verified by executable path
+  because the current shell PATH predated installation). npm was not
+  available in the Codex shell; pnpm was used for project scripts. A
+  regular Node.js install provides npm, and pnpm commands work here.
+- `pnpm run test`: 118 frontend tests passed. `pnpm run build`: TypeScript
+  build and Vite production build passed.
+- `uv run pytest -q`: 98 backend tests passed, 1 skipped. Existing
+  Starlette deprecation warnings remain.
+- Local-only `pnpm run dev`: frontend returned HTTP 200 and proxied
+  /api/v1/health returned {status:ok}; Ctrl+C stopped both services.
+- Public `pnpm run dev:tunnel`: generated a Quick Tunnel URL; frontend and
+  /api/v1/health loaded through it; a same-origin forgot-password request
+  returned the expected neutral HTTP 202; public readiness succeeded. The
+  root `start-project.ps1 -Tunnel` path was also exercised: it applied the
+  database migration check, started the services and public route, and the
+  temporary URL returned frontend HTTP 200 and API health {status:ok}. The
+  generated URL was then shut down with Ctrl+C, and ports 5173/49173 plus
+  cloudflared were confirmed stopped. An initial public check caught Vite
+  binding only to localhost/IPv6; the explicit IPv4 loopback bind fixed it.
+- Isolated config check confirmed APP_BASE_URL, the exact public CORS
+  origin, COOKIE_SECURE=1, and verification-link construction use the
+  public HTTPS origin. No email was sent by the tunnel probe.
+- No Cloudflare account, DNS, stable hostname, or token was needed for the
+  Quick Tunnel. Optional manual step: set BIOECONOMY_TUNNEL_ALLOWED_MAIL
+  in PowerShell if the Cloudflare email restriction is desired.
+
+======================================================================
+
+======================================================================
+15. FOLLOW-UP — QUICK TUNNEL URL IN THE MAIN STARTUP WINDOW (2026-10-28)
+======================================================================
+- Root cause: `Start Bioeconomy.bat` selected local-only `dev`, so no
+  cloudflared process ran and there was no public URL to print. The public
+  shortcut worked separately, but its URL appeared in the server window
+  instead of the startup window the user was watching.
+- Authoritative shortcut behavior: `Start Bioeconomy.bat` now launches
+  `start-project.ps1 -Tunnel`. After local services are ready, the root
+  startup window reads the generated Cloudflare URL and prints a clear
+  `Quick Tunnel URL: https://<random-name>.trycloudflare.com` line. The
+  server terminal remains open and owns the tunnel lifetime.
+- Local-only startup remains available through `Start Bioeconomy Local.bat`
+  or `pnpm run dev` from frontend. `Start Bioeconomy Public.bat` remains an
+  explicit public-mode alias. No tunnel URL is generated by local-only mode.
+- Verification: ran `start-project.ps1 -Tunnel`; the same command output
+  included the generated Quick Tunnel URL. Opened the public URL: frontend
+  returned HTTP 200 and `/api/v1/health` returned `ok`. Stopped the
+  launcher-owned process tree; ports 5173/49173 and cloudflared were
+  confirmed stopped. The displayed test URL is temporary and expired.
+
+======================================================================
