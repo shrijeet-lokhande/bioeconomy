@@ -3,7 +3,7 @@ import { authApi, ApiRequestError } from "../lib/api";
 import { readPendingVerification, type PendingDelivery } from "../auth/pendingEmail";
 
 interface ResendResult {
-  state: "idle" | "sending" | "sent" | "error";
+  state: "idle" | "sending" | "requested" | "error";
   message: string | null;
 }
 
@@ -11,10 +11,8 @@ interface ResendResult {
  * Verification-pending screen, shown after registration and when sign-in is
  * blocked because the account is not verified yet.
  *
- * Honesty rules:
- * - We never claim an email was sent unless the backend accepted it.
- * - The resend confirmation is neutral: identical whether or not the
- *   address belongs to an account (no enumeration via this screen).
+ * Registration reports provider acceptance. Resend stays neutral to prevent
+ * account enumeration and does not claim that the provider delivered email.
  */
 export function VerificationPendingPage() {
   const pending = readPendingVerification();
@@ -64,10 +62,11 @@ export function VerificationPendingPage() {
       // Neutral by design: identical text for any address.
       void response;
       setResend({
-        state: "sent",
+        state: "requested",
         message:
           "If this address has an account awaiting verification, "
-          + "a new verification email has been sent.",
+          + "we have attempted to send a new verification email. "
+          + "This message does not confirm delivery.",
       });
     } catch (error) {
       const message =
@@ -104,7 +103,7 @@ export function VerificationPendingPage() {
 
         {resend.message !== null ? (
           <p
-            className={resend.state === "error" ? "form-error" : "form-success"}
+            className={resend.state === "error" ? "form-error" : "form-note"}
             role={resend.state === "error" ? "alert" : "status"}
           >
             {resend.message}

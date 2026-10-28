@@ -243,7 +243,7 @@ describe("registration flow", () => {
     // Synchronous check while the request is pending.
     expect((resendButton as HTMLButtonElement).disabled).toBe(true);
     const confirmation = await screen.findByText(
-      /If this address has an account awaiting verification/i,
+      /we have attempted to send a new verification email/i,
     );
     expect(confirmation).toBeTruthy();
     // Back to enabled after completion (repeat clicks safe).

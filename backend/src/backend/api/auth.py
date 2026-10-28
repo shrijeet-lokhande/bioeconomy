@@ -62,7 +62,8 @@ TOKEN_REJECTED_MESSAGE = (
 )
 RESEND_NEUTRAL_MESSAGE = (
     "If this address has an account awaiting verification, "
-    "a new verification email has been sent."
+    "we have attempted to send a new verification email. "
+    "This message does not confirm delivery."
 )
 VERIFY_UPDATED_MESSAGE = (
     "Email address verified. You can now sign in."

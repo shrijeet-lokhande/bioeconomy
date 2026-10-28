@@ -911,3 +911,36 @@ random trycloudflare.com hostname is expired and is not recorded here.
   confirmed stopped. The displayed test URL is temporary and expired.
 
 ======================================================================
+======================================================================
+16. RESEND DELIVERY FAILURE FOR NON-OWNER RECIPIENTS (2026-10-28)
+======================================================================
+- Screenshot diagnosis: backend/.env is configured for MAIL_BACKEND=resend,
+  but MAIL_FROM_ADDRESS is still onboarding@resend.dev. This is Resend's
+  test sender and cannot be used for ordinary verification mail to a
+  non-owner recipient. The code and Quick Tunnel URL are not the cause.
+- The user's supplied send-only API key was already present in the ignored
+  backend/.env. A POST to Resend's documented delivered@resend.dev test
+  recipient was accepted, confirming that this key can send. Domain listing
+  was not available with this restricted key. No real user's mailbox was
+  used for the API-key check.
+- To send to arbitrary addresses, add a domain controlled by the account in
+  Resend's Domains page, publish the SPF/DKIM records it supplies at that
+  domain's DNS host, and wait for Resend to mark sending as verified. Then
+  change MAIL_FROM_ADDRESS in backend/.env to an address on that verified
+  domain (example only: Bioeconomy <verify@your-domain.example>) and restart
+  the backend. Do not use the example literally. The app's public-mode
+  launcher supplies APP_BASE_URL as the current HTTPS tunnel URL.
+- The current Resend key is send-only, so it cannot report domain inventory;
+  the account owner must complete or confirm domain verification in Resend.
+  No DNS records/domain name were guessed or changed. Pending this step, the
+  friend's mailbox still cannot receive the verification link.
+- UI honesty fix: resend's privacy-preserving message now says the server
+  attempted to send and that the notice does not confirm delivery. The UI
+  uses neutral styling instead of a green “sent” success banner. Registration
+  continues to report provider acceptance/failure explicitly.
+- Verification: Resend accepted the synthetic delivered@resend.dev check;
+  backend auth tests: 39 passed; frontend: 118 passed. No test email was
+  sent to the friend's personal mailbox; frontend TypeScript/build passed.
+  Key contents are not recorded here.
+
+======================================================================

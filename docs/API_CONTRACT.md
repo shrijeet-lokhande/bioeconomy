@@ -106,7 +106,7 @@ Request: `{ "email": "jane@example.com" }`.
 - **202 always** (for any syntactically valid email) with one constant body:
 
 ```json
-{ "message": "If this address has an account awaiting verification, a new verification email has been sent." }
+{ "message": "If this address has an account awaiting verification, we have attempted to send a new verification email. This message does not confirm delivery." }
 ```
 
 - The response is deliberately non-enumerating: account existence, verified
