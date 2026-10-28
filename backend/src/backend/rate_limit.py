@@ -7,6 +7,7 @@ shared limiter (e.g. Redis-backed) + proxy-aware client IP handling is a
 concrete follow-up task before multi-instance production deployment.
 """
 
+import hashlib
 import threading
 import time
 
@@ -37,5 +38,21 @@ def enforce_rate_limit(request: Request, scope: str) -> None:
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many requests. Please try again later.",
             )
+        recent.append(now)
+        _buckets[key] = recent
+
+
+def enforce_identifier_rate_limit(identifier: str, scope: str, limit: int, window_seconds: float) -> None:
+    """Rate-limit a normalized account identifier without storing/logging it."""
+    if not get_settings().rate_limit_enabled:
+        return
+    digest = hashlib.sha256(identifier.encode("utf-8")).hexdigest()
+    key = f"{scope}:identifier:{digest}"
+    now = time.monotonic()
+    with _lock:
+        recent = [t for t in _buckets.get(key, []) if now - t < window_seconds]
+        if len(recent) >= limit:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                                detail="Too many requests. Please try again later.")
         recent.append(now)
         _buckets[key] = recent

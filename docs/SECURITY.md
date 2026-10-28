@@ -9,6 +9,14 @@ not aspirational: items marked "deferred" are not implemented.
   t=3, m=64 MiB, p=4, unique per-hash salt). No plaintext or reversible
   password data exists anywhere; automated test asserts the PHC format in
   the database row.
+- **Password recovery**: reset links contain 256-bit random tokens while
+  `auth_password_reset_tokens` stores only SHA-256 hashes. Tokens expire after
+  30 minutes by default, are single-use, and are revoked on reset. Password
+  changes use the existing Argon2id policy and revoke every active database
+  session in the same transaction. Public request responses are identical for
+  existing and unknown addresses; reset pages strip the URL token and use a
+  no-referrer policy. The current process-local rate limiter is suitable only
+  for a single API process; multi-worker production needs a shared limiter.
 - **Server-side validation**: every registration/login field is validated on
   the server (Pydantic), independent of frontend checks. Max lengths enforced
   (name 200, email 320, password 200; password minimum 10 — a length-only

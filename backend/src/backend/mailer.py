@@ -19,6 +19,7 @@ import logging
 import pathlib
 import smtplib
 import ssl
+from html import escape as html_escape
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email import policy as email_policy
@@ -50,6 +51,38 @@ class VerificationEmailContext:
     full_name: str
     verification_url: str
     expires_in_minutes: int
+
+
+@dataclass(frozen=True)
+class PasswordResetEmailContext:
+    recipient: str
+    full_name: str
+    reset_url: str
+    expires_in_minutes: int
+
+
+def build_password_reset_email(context: PasswordResetEmailContext) -> OutgoingEmail:
+    name = context.full_name or "there"
+    safe_name = html_escape(name)
+    expiry = f"This link expires in {context.expires_in_minutes} minutes and can be used only once."
+    plain = (f"Hi {name},\n\nA password reset was requested for your Bioeconomy account.\n\n"
+             f"Set a new password: {context.reset_url}\n\n{expiry}\n\n"
+             "If you did not request this, ignore this email. Support staff will never need your current password.\n")
+    html = (f"<p>Hi <strong>{safe_name}</strong>,</p><p>A password reset was requested for your Bioeconomy account.</p>"
+            f'<p><a href="{context.reset_url}">Set a new password</a></p><p>{expiry}</p>'
+            "<p>If you did not request this, ignore this email. Support staff will never need your current password.</p>")
+    return OutgoingEmail(context.recipient, "Reset your Bioeconomy password", plain, html)
+
+
+def build_password_changed_email(recipient: str, full_name: str) -> OutgoingEmail:
+    name = full_name or "there"
+    safe_name = html_escape(name)
+    plain = (f"Hi {name},\n\nYour Bioeconomy account password was changed. "
+             "All other active sessions have been signed out.\n\n"
+             "If you did not make this change, contact support immediately.\n")
+    html = (f"<p>Hi <strong>{safe_name}</strong>,</p><p>Your Bioeconomy account password was changed. "
+            "All other active sessions have been signed out.</p><p>If you did not make this change, contact support immediately.</p>")
+    return OutgoingEmail(recipient, "Your Bioeconomy password was changed", plain, html)
 
 
 def build_verification_email(
@@ -248,9 +281,7 @@ class ResendEmailSender(EmailSender):
 
         if response.status_code in (200, 201):
             logger.info(
-                "MAIL[resend] verification email accepted for %s (subject: %s)",
-                message.to_address,
-                message.subject,
+                "MAIL[resend] message accepted (subject: %s)", message.subject,
             )
             return
 

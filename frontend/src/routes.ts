@@ -18,7 +18,9 @@ export type RouteId =
   | "login"
   | "register"
   | "verify-email"
-  | "verification-pending";
+  | "verification-pending"
+  | "forgot-password"
+  | "reset-password";
 
 export type RouteStatus = "prototype" | "planned";
 
@@ -180,6 +182,16 @@ export const ROUTES: readonly AppRoute[] = [
     status: "prototype",
     showInNav: false,
     access: "public",
+  },
+  {
+    id: "forgot-password", label: "Forgot password", hash: "#/forgot-password",
+    heading: "Forgot password", description: "Request a secure password reset link.",
+    status: "prototype", showInNav: false, access: "public",
+  },
+  {
+    id: "reset-password", label: "Reset password", hash: "#/reset-password",
+    heading: "Reset password", description: "Choose a new password using a single-use reset link.",
+    status: "prototype", showInNav: false, access: "public",
   },
 ] as const;
 

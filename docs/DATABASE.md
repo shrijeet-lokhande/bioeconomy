@@ -1,5 +1,9 @@
 # Local Development Database
 
+Password recovery adds migration `6ea0c1b3a912_password_reset_tokens`,
+creating a dedicated hashed-token table and lookup indexes. Apply it with
+`uv run alembic upgrade head`; existing user and session rows are untouched.
+
 This machine runs PostgreSQL 18.6 natively (no Docker available on the
 system). Recorded here for future sessions — factual setup state, not
 instructions to reproduce a specific password.

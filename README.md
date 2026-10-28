@@ -117,7 +117,8 @@ The backend exposes `backend/main.py:app` in the src layout (README history
 documented `backend/app/main.py` — that layout does not exist; see docs/CURRENT_STATE.md).
 
 Authentication endpoints live under `/api/v1/auth` (register, login,
-logout, me, verify-email, resend-verification). Registration requires email
+logout, me, verify-email, resend-verification, forgot-password,
+reset-password). Registration requires email
 confirmation before first sign-in: configure a mail backend (`MAIL_BACKEND`:
 `console` for a local gitignored outbox, `resend`, or `smtp`; see
 backend/README.md). Only run this after `alembic upgrade head` — the app

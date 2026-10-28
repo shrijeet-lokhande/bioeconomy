@@ -6,6 +6,8 @@ import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { VerificationPendingPage } from "./pages/VerificationPendingPage";
 import { VerifyEmailPage } from "./pages/VerifyEmailPage";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { AdminPage } from "./pages/AdminPage";
 import { MarketplacePage } from "./pages/MarketplacePage";
 import { useAuth } from "./auth/AuthContext";
@@ -32,6 +34,10 @@ function renderPage(routeId: RouteId): ReactNode {
       return <VerifyEmailPage />;
     case "verification-pending":
       return <VerificationPendingPage />;
+    case "forgot-password":
+      return <ForgotPasswordPage />;
+    case "reset-password":
+      return <ResetPasswordPage />;
     case "admin":
       return <AdminPage />;
     default:

@@ -190,6 +190,12 @@ export const authApi = {
       method: "POST",
       body: { email },
     }),
+
+  forgotPassword: (email: string) =>
+    request<{ message: string }>("/auth/forgot-password", { method: "POST", body: { email } }),
+
+  resetPassword: (token: string, password: string) =>
+    request<{ message: string }>("/auth/reset-password", { method: "POST", body: { token, password } }),
 };
 
 // ---------------------------------------------------------------------------

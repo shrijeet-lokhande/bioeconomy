@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import uuid
+import pytest
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -237,7 +238,12 @@ def test_path_traversal_and_malformed_keys_are_refused(db_session, tmp_path):
     # A valid-looking name that is a symlink pointing OUTSIDE the upload dir.
     evil_name = "a" * 32 + ".png"
     link = root / evil_name
-    link.symlink_to(victim)
+    try:
+        link.symlink_to(victim)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("This Windows environment does not permit symlink creation.")
+        raise
     assert img_svc.safe_unlink(evil_name) == "invalid"
     assert victim.exists()
     link.unlink()

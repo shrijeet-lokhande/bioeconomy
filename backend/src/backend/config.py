@@ -55,6 +55,8 @@ class Settings(BaseSettings):
 
     # Verification token lifetime in minutes (default 30).
     verification_token_minutes: int = 30
+    password_reset_token_minutes: int = 30
+    password_reset_email_limit_per_hour: int = 3
 
     # Email delivery backend: "console" (dev: writes to .mail_outbox/),
     # "smtp" (generic SMTP servers), or "resend" (Resend HTTP API).

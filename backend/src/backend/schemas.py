@@ -121,3 +121,23 @@ class ResendVerificationResponse(BaseModel):
     response."""
 
     message: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    email: EmailStr = Field(max_length=EMAIL_MAX_LENGTH)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_email(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
+
+
+class ResetPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    token: str = Field(min_length=16, max_length=200)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+
+class GenericAuthMessage(BaseModel):
+    message: str

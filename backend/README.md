@@ -78,6 +78,31 @@ backed by PostgreSQL with Alembic migrations.
 
 ## API — authentication (`/api/v1/auth`)
 
+### Forgot and reset password
+
+`POST /forgot-password` accepts `{ "email": "..." }` and always returns
+the same neutral 202 response. Eligible (active, email-verified) accounts
+receive a reset link using the trusted `APP_BASE_URL`. Tokens are random
+256-bit values; only SHA-256 hashes are stored, they expire after
+`PASSWORD_RESET_TOKEN_MINUTES` (30 by default), and each token works once.
+`POST /reset-password` accepts `{ "token": "...", "password": "..." }`.
+On success, all outstanding reset tokens and database sessions for that
+account are revoked; the user must sign in again. Passwords retain the
+existing 10–200 character policy and Argon2id hashing. Reset pages strip
+the token from the address bar and the app sets a no-referrer policy.
+
+For local testing, `MAIL_BACKEND=console` writes messages to the ignored
+`.mail_outbox/`; open the newest message and follow the link. To send real
+mail, configure `MAIL_BACKEND=resend`, `RESEND_API_KEY`, and
+`MAIL_FROM_ADDRESS` (use `onboarding@resend.dev` for Resend test mode, which
+may deliver only to the account owner's address until a domain is verified).
+Set `APP_BASE_URL` to the trusted frontend origin; production must use HTTPS.
+Authentication rate limits use the current process-local limiter, so put a
+shared limiter and proxy-aware IP handling in front of multi-worker production
+deployments. Reset requests are additionally limited to three per normalized
+email identifier per hour using a SHA-256 identifier key; the email address is
+not retained in the limiter's bucket keys.
+
 | Method | Path | Auth | Success | Error statuses |
 | --- | --- | --- | --- | --- |
 | POST | `/register` | none | 201 `RegisterResponse` | 409 duplicate email, 422 validation, 429 rate limit, 403 disallowed Origin |

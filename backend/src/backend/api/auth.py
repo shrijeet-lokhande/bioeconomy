@@ -8,7 +8,7 @@ credentials anywhere.
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -23,13 +23,17 @@ from backend.config import get_settings
 from backend.mailer import (
     EmailDeliveryError,
     EmailSender,
+    PasswordResetEmailContext,
     VerificationEmailContext,
+    build_password_changed_email,
+    build_password_reset_email,
     build_verification_email,
     get_email_sender,
     verification_url,
 )
-from backend.models import User
-from backend.rate_limit import enforce_rate_limit
+from backend.models import AuthPasswordResetToken, User
+from backend.password_reset import PasswordResetService
+from backend.rate_limit import enforce_rate_limit, enforce_identifier_rate_limit
 from backend.schemas import (
     LoginRequest,
     RegisterRequest,
@@ -39,12 +43,12 @@ from backend.schemas import (
     UserPublic,
     VerifyEmailRequest,
     VerifyEmailResponse,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    GenericAuthMessage,
 )
 from backend.security import hash_password, verify_password
-from backend.sessions import (
-    SESSION_COOKIE_NAME,
-    SessionService,
-)
+from backend.sessions import SESSION_COOKIE_NAME, SessionService, hash_token
 from backend.verification import VerificationService
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -63,6 +67,8 @@ RESEND_NEUTRAL_MESSAGE = (
 VERIFY_UPDATED_MESSAGE = (
     "Email address verified. You can now sign in."
 )
+PASSWORD_RESET_NEUTRAL_MESSAGE = "If an account exists for that email address, reset instructions may be sent. If you don't receive an email, check spam or request another link later."
+PASSWORD_RESET_REJECTED = "This password reset link is invalid or has expired. Request a new link and try again."
 
 # Constant-time equivalence for the "unknown email" branch: verifying against
 # a real Argon2id hash for a fixed dummy password removes the timing oracle
@@ -312,6 +318,55 @@ def resend_verification(
         _send_verification_email(user, raw_token, sender)
 
     return ResendVerificationResponse(message=RESEND_NEUTRAL_MESSAGE)
+
+
+@router.post("/forgot-password", status_code=202, response_model=GenericAuthMessage)
+def forgot_password(payload: ForgotPasswordRequest, request: Request, background_tasks: BackgroundTasks,
+                    db: Session = Depends(get_db), sender: EmailSender = Depends(get_email_sender)) -> GenericAuthMessage:
+    _untrusted_origin(request)
+    enforce_rate_limit(request, "forgot-password")
+    settings = get_settings()
+    enforce_identifier_rate_limit(payload.email, "forgot-password", settings.password_reset_email_limit_per_hour, 3600)
+    logger.info("Password reset requested")
+    user = db.scalar(select(User).where(User.email == payload.email))
+    if user is not None and user.is_active and user.is_email_verified:
+        service = PasswordResetService(db)
+        raw = service.issue(user)
+        email = build_password_reset_email(PasswordResetEmailContext(
+            recipient=user.email, full_name=user.full_name,
+            reset_url=f"{settings.app_base_url.rstrip('/')}/#/reset-password?token={raw}",
+            expires_in_minutes=settings.password_reset_token_minutes,
+        ))
+        background_tasks.add_task(_send_reset_email, sender, email)
+    return GenericAuthMessage(message=PASSWORD_RESET_NEUTRAL_MESSAGE)
+
+
+def _send_reset_email(sender: EmailSender, email) -> None:
+    try:
+        sender.send(email)
+        logger.info("Password reset email accepted")
+    except EmailDeliveryError:
+        logger.error("Password reset email delivery failed")
+
+
+@router.post("/reset-password", response_model=GenericAuthMessage)
+def reset_password(payload: ResetPasswordRequest, request: Request,
+                   background_tasks: BackgroundTasks, db: Session = Depends(get_db),
+                   sender: EmailSender = Depends(get_email_sender)) -> GenericAuthMessage:
+    _untrusted_origin(request)
+    enforce_rate_limit(request, "reset-password")
+    reset_row = db.scalar(select(AuthPasswordResetToken).where(
+        AuthPasswordResetToken.token_hash == hash_token(payload.token)
+    ))
+    user_id = reset_row.user_id if reset_row is not None else None
+    if not PasswordResetService(db).consume_and_reset(payload.token, payload.password):
+        logger.warning("Password reset token rejected")
+        raise HTTPException(status_code=400, detail=PASSWORD_RESET_REJECTED)
+    logger.info("Password reset completed; active sessions revoked")
+    user = db.get(User, user_id) if user_id is not None else None
+    if user is not None:
+        background_tasks.add_task(_send_reset_email, sender, build_password_changed_email(user.email, user.full_name))
+    return GenericAuthMessage(message="Password updated. Sign in with your new password.")
 
 
 __all__ = [

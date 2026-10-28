@@ -17,7 +17,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from backend.models import AuthEmailVerificationToken, AuthSession, User
+from backend.models import AuthEmailVerificationToken, AuthPasswordResetToken, AuthSession, User
 from backend.mailer import (
     CapturingEmailSender,
     ConsoleEmailSender,
@@ -323,7 +323,7 @@ def test_v2_email_generated_by_configured_sender(client):
     assert len(capture.sent) == 1
     message = capture.sent[0]
     assert message.to_address == payload["email"].lower()
-    assert "Verify your Bioeconomy email address" in message.subject
+    assert "Verify email for bioeconomy" in message.subject
     assert "http://localhost:5173/#/verify-email?token=" in message.text_body
     assert "30 minutes" in message.text_body
     # Message is fully formed (From header comes from the backend).
@@ -673,3 +673,100 @@ def test_factory_maps_backends_and_rejects_unconfigured(monkeypatch):
             type("M", (), {"to_address": "a@b.c", "subject": "s",
                           "text_body": "t", "html_body": "h"})()
         )
+
+
+def test_password_reset_generic_email_hash_single_use_and_session_revocation(client, db_session):
+    payload = make_verified(client, db_session)
+    assert login(client, payload["email"]).status_code == 200
+    response = client.post("/api/v1/auth/forgot-password", json={"email": payload["email"]})
+    unknown = client.post("/api/v1/auth/forgot-password", json={"email": unique_email("missing")})
+    assert response.status_code == unknown.status_code == 202
+    assert response.json() == unknown.json()
+    message = client.mail_capture.sent[-1]  # type: ignore[attr-defined]
+    token = re.search(r"token=([A-Za-z0-9_-]+)", message.text_body).group(1)
+    user = db_session.scalar(select(User).where(User.email == payload["email"]))
+    stored = db_session.scalar(select(AuthPasswordResetToken).where(AuthPasswordResetToken.user_id == user.id))
+    assert stored.token_hash == hash_token(token)
+    assert token not in stored.token_hash
+    reset = client.post("/api/v1/auth/reset-password", json={"token": token, "password": "brand-new-long-password"})
+    assert reset.status_code == 200
+    assert client.get("/api/v1/auth/me").status_code == 401
+    assert login(client, payload["email"], "brand-new-long-password").status_code == 200
+    assert login(client, payload["email"], VALID_PASSWORD).status_code == 401
+    assert client.post("/api/v1/auth/reset-password", json={"token": token, "password": "another-long-password"}).status_code == 400
+
+
+def test_password_reset_invalid_token_and_provider_failure_are_generic(client, db_session):
+    payload = make_verified(client, db_session)
+    expected = "If an account exists for that email address, reset instructions may be sent. If you don't receive an email, check spam or request another link later."
+    assert client.post("/api/v1/auth/forgot-password", json={"email": unique_email("unknown")}).json()["message"] == expected
+    failing = CapturingEmailSender(fail=True)
+    from backend.main import app
+    original = app.dependency_overrides.get(get_email_sender)
+    app.dependency_overrides[get_email_sender] = lambda: failing
+    try:
+        response = client.post("/api/v1/auth/forgot-password", json={"email": payload["email"]})
+        assert response.status_code == 202
+        assert response.json()["message"] == expected
+    finally:
+        if original is None:
+            app.dependency_overrides.pop(get_email_sender, None)
+        else:
+            app.dependency_overrides[get_email_sender] = original
+    assert client.post("/api/v1/auth/reset-password", json={"token": "x" * 40, "password": "new-long-password"}).status_code == 400
+
+
+def test_password_reset_expired_token_rejected(client, db_session):
+    from datetime import datetime, timedelta, timezone
+    payload = make_verified(client, db_session)
+    client.post("/api/v1/auth/forgot-password", json={"email": payload["email"]})
+    token = re.search(r"token=([A-Za-z0-9_-]+)", client.mail_capture.sent[-1].text_body).group(1)  # type: ignore[attr-defined]
+    row = db_session.scalar(select(AuthPasswordResetToken).where(AuthPasswordResetToken.token_hash == hash_token(token)))
+    row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    db_session.commit()
+    assert client.post("/api/v1/auth/reset-password", json={"token": token, "password": "new-long-password"}).status_code == 400
+
+
+def test_password_reset_token_cannot_win_two_concurrent_consumers(client, db_session, test_engine):
+    from sqlalchemy.orm import sessionmaker
+    from backend.password_reset import PasswordResetService
+    payload = make_verified(client, db_session)
+    user = db_session.scalar(select(User).where(User.email == payload["email"]))
+    raw = PasswordResetService(db_session).issue(user)
+    factory = sessionmaker(bind=test_engine, expire_on_commit=False)
+    barrier = threading.Barrier(2)
+    results = {}
+    def attempt(name):
+        session = factory(); barrier.wait()
+        results[name] = PasswordResetService(session).consume_and_reset(raw, "new-long-password-123")
+        session.close()
+    workers = [threading.Thread(target=attempt, args=(name,)) for name in ("a", "b")]
+    for worker in workers: worker.start()
+    for worker in workers: worker.join(timeout=30)
+    assert sorted(results.values()) == [False, True]
+
+
+def test_password_reset_requests_are_limited_by_hashed_email_identifier(client, monkeypatch):
+    from backend.config import get_settings
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "1")
+    monkeypatch.setenv("PASSWORD_RESET_EMAIL_LIMIT_PER_HOUR", "3")
+    get_settings.cache_clear()
+    try:
+        email = unique_email("rate")
+        statuses = [client.post("/api/v1/auth/forgot-password", json={"email": email}).status_code for _ in range(4)]
+        assert statuses == [202, 202, 202, 429]
+        assert client.post("/api/v1/auth/forgot-password", json={"email": unique_email("rate-other")}).status_code == 202
+    finally:
+        get_settings.cache_clear()
+
+
+def test_password_reset_email_escapes_name_and_uses_trusted_reset_url():
+    from backend.mailer import PasswordResetEmailContext, build_password_reset_email
+    message = build_password_reset_email(PasswordResetEmailContext(
+        recipient="person@example.com", full_name="<img src=x>",
+        reset_url="https://app.example/#/reset-password?token=rawtoken",
+        expires_in_minutes=30,
+    ))
+    assert "&lt;img src=x&gt;" in message.html_body
+    assert "https://app.example/#/reset-password?token=rawtoken" in message.text_body
+    assert "Support staff will never need your current password." in message.text_body

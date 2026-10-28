@@ -102,6 +102,8 @@ export function LoginPage() {
             ) : null}
           </div>
 
+          <p className="auth-switch"><a href="#/forgot-password">Forgot password?</a></p>
+
           <button type="submit" className="btn btn--primary" disabled={submitting}>
             {submitting ? "Signing in…" : "Sign in"}
           </button>
