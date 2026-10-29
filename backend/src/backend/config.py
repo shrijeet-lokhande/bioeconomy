@@ -7,6 +7,7 @@ variable with placeholder values only — never commit real credentials.
 """
 
 from functools import lru_cache
+import re
 
 from email_validator import EmailNotValidError, validate_email
 from pydantic import Field, field_validator, model_validator
@@ -28,7 +29,7 @@ class Settings(BaseSettings):
     app_name: str = "Bioeconomy API"
 
     # Explicit deployment environment. Production mail settings are checked
-    # before FastAPI starts so the shared Resend test sender cannot be used
+    # before FastAPI starts so sandbox senders cannot be used
     # accidentally for real users.
     app_env: str = "development"
 
@@ -64,8 +65,7 @@ class Settings(BaseSettings):
     password_reset_email_limit_per_hour: int = 3
     verification_email_limit_per_hour: int = Field(default=3, ge=1)
 
-    # Email delivery backend: "console" (dev: writes to .mail_outbox/),
-    # "smtp" (generic SMTP servers), or "resend" (Resend HTTP API).
+    # Email delivery backend: "console", "smtp", or "mailgun".
     mail_backend: str = "console"
 
     # Generic SMTP configuration (used when MAIL_BACKEND=smtp).
@@ -75,12 +75,14 @@ class Settings(BaseSettings):
     mail_password: str = ""
     mail_use_tls: bool = True
 
-    # Sender address. The example default is suitable only for the console
-    # backend; Resend production needs an address on an owned verified domain.
+    # Sender identity configured with the selected provider.
     mail_from_address: str = "onboarding@example.org"
+    mail_from_name: str = "Bioeconomy"
 
-    # Resend HTTP API key (https://resend.com). Secret — .env only.
-    resend_api_key: str = Field(default="", repr=False)
+    # Mailgun HTTP API. Use a domain sending key, stored in .env only.
+    mailgun_api_key: str = Field(default="", repr=False)
+    mailgun_domain: str = ""
+    mailgun_region: str = "us"
 
     # Outbox directory for the console dev backend (relative to CWD when
     # running from backend/). Gitignored.
@@ -97,7 +99,7 @@ class Settings(BaseSettings):
     # Per-file upload cap in MB (5 MB); at most 5 images per record.
     biomass_image_max_mb: int = 5
 
-    @field_validator("app_env", "mail_backend", mode="before")
+    @field_validator("app_env", "mail_backend", "mailgun_region", mode="before")
     @classmethod
     def normalize_environment_labels(cls, value: object) -> str:
         return str(value).strip().lower()
@@ -112,13 +114,20 @@ class Settings(BaseSettings):
     @field_validator("mail_backend")
     @classmethod
     def validate_mail_backend(cls, value: str) -> str:
-        if value not in {"console", "smtp", "resend"}:
-            raise ValueError("MAIL_BACKEND must be console, smtp, or resend.")
+        if value not in {"console", "smtp", "mailgun"}:
+            raise ValueError("MAIL_BACKEND must be console, smtp, or mailgun.")
+        return value
+
+    @field_validator("mailgun_region")
+    @classmethod
+    def validate_mailgun_region(cls, value: str) -> str:
+        if value not in {"us", "eu"}:
+            raise ValueError("MAILGUN_REGION must be us or eu.")
         return value
 
     @model_validator(mode="after")
     def validate_mail_configuration(self) -> "Settings":
-        if self.mail_backend in {"smtp", "resend"}:
+        if self.mail_backend in {"smtp", "mailgun"}:
             try:
                 validate_email(
                     self.mail_from_address.strip(),
@@ -130,8 +139,15 @@ class Settings(BaseSettings):
                     "MAIL_FROM_ADDRESS must be a valid email address."
                 ) from exc
 
-        if self.mail_backend == "resend" and not self.resend_api_key.strip():
-            raise ValueError("RESEND_API_KEY is required when MAIL_BACKEND=resend.")
+        if self.mail_backend == "mailgun":
+            if not self.mailgun_api_key.strip():
+                raise ValueError("MAILGUN_API_KEY is required when MAIL_BACKEND=mailgun.")
+            if not self.mailgun_domain.strip():
+                raise ValueError("MAILGUN_DOMAIN is required when MAIL_BACKEND=mailgun.")
+            if not re.fullmatch(r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}", self.mailgun_domain.strip()):
+                raise ValueError("MAILGUN_DOMAIN must be a valid sending domain.")
+            if self.mail_from_address.rsplit("@", 1)[-1].lower() != self.mailgun_domain.strip().lower():
+                raise ValueError("MAIL_FROM_ADDRESS domain must match MAILGUN_DOMAIN.")
 
         if self.mail_backend == "smtp":
             if not self.mail_host.strip():
@@ -158,7 +174,8 @@ class Settings(BaseSettings):
                 )
             )
             if reserved_domain or (
-                self.mail_backend == "resend" and sender_domain == "resend.dev"
+                self.mail_backend == "mailgun"
+                and self.mailgun_domain.lower().startswith("sandbox")
             ):
                 raise ValueError(
                     "Production mail requires MAIL_FROM_ADDRESS on a real sender "

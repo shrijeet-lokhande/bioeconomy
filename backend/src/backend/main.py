@@ -22,11 +22,10 @@ def create_app() -> FastAPI:
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
     sender_domain = settings.mail_from_address.rsplit("@", 1)[-1].lower()
-    if settings.mail_backend == "resend" and sender_domain == "resend.dev":
+    if settings.mail_backend == "mailgun" and settings.mailgun_domain.lower().startswith("sandbox"):
         logging.getLogger("backend.startup").warning(
-            "Resend shared test sender is configured; it cannot be used for "
-            "ordinary user verification. Verify an owned sender domain and "
-            "update MAIL_FROM_ADDRESS."
+            "Mailgun sandbox sending domain is configured; recipients may need "
+            "authorization. Configure a verified production sending domain."
         )
     app = FastAPI(title=settings.app_name, version="0.1.0")
 

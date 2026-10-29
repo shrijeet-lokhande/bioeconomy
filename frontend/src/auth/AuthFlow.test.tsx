@@ -230,7 +230,7 @@ describe("registration flow", () => {
     expect(
       await screen.findByRole("heading", { name: "Verify your email" }),
     ).toBeTruthy();
-    expect(screen.getByText(/Resend accepted the verification email for processing/i)).toBeTruthy();
+    expect(screen.getByText(/email provider accepted the verification message for processing/i)).toBeTruthy();
     expect(
       screen.getAllByText(/jane@example\.com/).length,
     ).toBeGreaterThan(0);

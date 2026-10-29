@@ -536,3 +536,45 @@ build succeeded. No real recipient inbox delivery was verified. The Resend
 free plan page currently lists 3,000 emails/month, 100/day, and three domains;
 confirm current account usage/limits in the dashboard because this key cannot
 read usage. No secrets or personal recipient addresses were recorded here.
+
+
+======================================================================
+17. MAILGUN PROVIDER MIGRATION (2026-10-30)
+======================================================================
+- Replaced the active Resend integration with Mailgun Messages API via the
+  existing httpx client abstraction. Uses HTTP Basic Auth (`api` + key),
+  multipart fields, the configured sender and exact registration recipient,
+  correlation metadata, and region-aware US/EU endpoints. Provider acceptance
+  is not presented as inbox delivery. Safe status/error classification,
+  bounded timeouts, no blind retries, and existing token persistence/resend
+  protections remain in place. No schema or frontend contract change.
+- Mailgun requires MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_REGION (`us`/`eu`),
+  MAIL_FROM_ADDRESS (matching domain), optional MAIL_FROM_NAME, and
+  MAIL_BACKEND=mailgun. These are never exposed to frontend code. `.env.example`
+  contains placeholders only. Local `backend/.env` has been switched to the
+  console outbox and the old Resend credential removed; no Mailgun credential
+  was supplied for live sending.
+- The credential embedded in the supplied Java example was treated as
+  compromised and was not copied, used, logged, or documented. Revoke it in
+  Mailgun Dashboard > Account Settings > API Keys; if it is a domain sending
+  key, revoke it under the domain's sending-key controls. Create a new
+  domain-scoped sending key and enter it only in ignored `backend/.env`.
+  Rotation was not performed or verified from this environment.
+- Public Mailgun account/domain status could not be established because no
+  authorized Mailgun credentials/domain were configured. Do not use a sandbox
+  domain for public registrations; it restricts recipients. Configure an
+  owned production domain, publish Mailgun's generated SPF and DKIM records,
+  verify sending status, and use the correct region. MX records are for inbound
+  receiving/routing; CNAME supports tracking. Add a separate DMARC TXT record
+  at `_dmarc` (start at `p=none` while observing alignment). Mailgun dashboard
+  account-level recipient authorization and sending limits also remain to be
+  checked.
+- Automated tests use mocked HTTP and no email is sent. Live delivery to two
+  recipients was not attempted because no new Mailgun credential/domain was
+  configured. No account state or delivery status is fabricated.
+- Files changed: backend config, mailer, startup warning, provider tests,
+  backend README, `.env.example`, security/API/current-state docs, and this
+  context. Frontend and database schemas were not changed.
+- Verification: `uv run pytest -q` = 110 passed, 1 skipped (8 existing
+  deprecation warnings); `pnpm run test` = 119 passed; `pnpm run build`
+  (TypeScript + Vite production build) succeeded. `git diff --check` clean.

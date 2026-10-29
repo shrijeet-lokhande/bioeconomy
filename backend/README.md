@@ -70,11 +70,14 @@ backed by PostgreSQL with Alembic migrations.
 | `APP_BASE_URL` | Trusted base URL used to build verification links (NEVER from the request Host header) |
 | `VERIFICATION_TOKEN_MINUTES` | Verification token lifetime, default 30 |
 | `VERIFICATION_EMAIL_LIMIT_PER_HOUR` | Maximum resend-verification attempts for one normalized address in one hour, default 3 |
-| `MAIL_BACKEND` | `console` (dev outbox), `smtp` (generic SMTP), or `resend` (Resend HTTP API) |
+| `MAIL_BACKEND` | `console` (dev outbox), `smtp` (generic SMTP), or `mailgun` (Mailgun Messages API) |
 | `MAIL_OUTBOX_DIR` | Where the console backend writes `.eml` files (default `.mail_outbox`, gitignored) |
 | `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_USE_TLS` | Generic SMTP configuration (`MAIL_USE_TLS=1` enforces STARTTLS) |
 | `MAIL_FROM_ADDRESS` | Sender address of verification emails |
-| `RESEND_API_KEY` | Resend API key (secret; `.env` only). A failed/absent key is never treated as a successful send |
+| `MAIL_FROM_NAME` | Sender display name, default `Bioeconomy` |
+| `MAILGUN_API_KEY` | Domain-scoped Mailgun sending key (secret; `.env` only) |
+| `MAILGUN_DOMAIN` | Verified Mailgun sending domain, e.g. `mg.example.com` |
+| `MAILGUN_REGION` | `us` or `eu`, matching the Mailgun domain region |
 | `BIOMASS_IMAGE_UPLOAD_DIR` | Where uploaded record-image files are stored (default `.data/biomass_images`, gitignored; server-generated names; served only via the authorized image endpoint) |
 | `BIOMASS_IMAGE_MAX_MB` | Per-image size cap in MB, default 5 (1–5 images per record is a fixed server rule) |
 
@@ -94,92 +97,37 @@ existing 10–200 character policy and Argon2id hashing. Reset pages strip
 the token from the address bar and the app sets a no-referrer policy.
 
 For local testing, `MAIL_BACKEND=console` writes messages to the ignored
-`.mail_outbox/`; open the newest message and follow the link. For real Resend
-delivery, configure `MAIL_BACKEND=resend`, `RESEND_API_KEY`, and
-`MAIL_FROM_ADDRESS` on a domain you own and Resend marks verified. Resend's
-`onboarding@resend.dev` shared sender is for testing; it is not a production
-sender for arbitrary users. The app fails startup in `APP_ENV=production` if
-`COOKIE_SECURE=0`, the sender is shared/placeholder, the backend is console,
-or `APP_BASE_URL` is not HTTPS. A configured sender address is not proof that
-its domain is verified. In development, the shared sender remains available
-for test-mode use but startup prints a warning that it cannot serve ordinary
-user verification.
+`.mail_outbox/`; open the newest message and follow the link. For real Mailgun delivery, configure `MAIL_BACKEND=mailgun`, a newly created
+`MAILGUN_API_KEY`, the verified `MAILGUN_DOMAIN`, its `MAILGUN_REGION`, and a
+`MAIL_FROM_ADDRESS` on exactly that domain. Mailgun sandbox domains restrict
+recipients; do not use them for public registration. API acceptance is not
+proof of inbox delivery. See the Mailgun setup section below.
 
-### Resend domain and delivery setup
+### Mailgun domain and delivery setup
 
-1. In the Resend dashboard, open **Domains**, add a domain or (recommended)
-   a transactional subdomain you control, and copy the DNS records Resend
-   displays exactly. Add the displayed DKIM and SPF records, plus any return-
-   path records shown for the chosen configuration, at the domain's DNS host.
-   Record names and values are generated for that domain; never copy sample
-   values from this README or create a duplicate SPF record at the same host.
-2. Click **Verify** in Resend and wait until sending capability is marked
-   verified. Resend requires an owned verified domain for ordinary sender
-   addresses. DMARC is strongly recommended for authentication/alignment; start
-   with a monitoring policy such as `p=none` while reviewing reports, then
-   tighten it only after every legitimate sender is accounted for. DMARC is a
-   separate DNS TXT record at `_dmarc.<domain>` and does not replace SPF/DKIM.
-3. Set `MAIL_FROM_ADDRESS=verify@<verified-domain>` and `APP_ENV=production`.
-   Use a send-only API key permitted to send from that verified domain. Keep
-   `RESEND_API_KEY` in `backend/.env` or a secret store, never in source or
-   logs. Restart the backend after changing configuration.
-4. Public responses and the registration UI distinguish Resend API acceptance
-   from mailbox delivery. The server logs the correlation ID and Resend email
-   ID, if returned; they contain no recipient address, token, or provider error
-   body. Timeouts are recorded as an unknown acceptance state and are not
-   retried automatically. Use the correlation ID to find the matching message
-   in Resend's Emails dashboard.
-5. In Resend, open **Emails** and inspect the individual event timeline. Check
-   for `email.sent`, `email.delivered`, `email.bounced`,
-   `email.delivery_delayed`, `email.complained`, `email.failed`, or
-   `email.suppressed` as applicable. `email.sent`/an API email ID means the
-   provider accepted it, not that the mailbox received it. A Delivered event
-   confirms acceptance by the recipient mail server, not inbox placement; also
-   check spam/quarantine and the recipient provider's logs when needed.
-6. Automated tests mock Resend. For a live domain setup, register one
-   consenting test mailbox, confirm an `email.delivered` event, open the link,
-   and verify that reusing the token fails. Resend's `delivered@resend.dev`
-   is a test recipient useful for request-path checks only; it does not prove
-   delivery to arbitrary inboxes.
-
-The configured key on this development machine is send-only: read-only API
-requests for domains, email history, and usage returned HTTP 401, so no
-account-level domain state, recipient events, or quota could be inspected
-programmatically. Use the Resend dashboard for those checks. Resend's current
-public pricing lists a free quota, but plan and account-level limits can
-change; check [current pricing](https://resend.com/pricing) and usage in the
-account rather than treating an email ID as proof of a quota or delivery.
-At this documentation update (2026-10-30), the public free plan lists 3,000
-emails per month, a 100-per-day limit, and three domains; the actual account's
-usage remains unverified because the configured key cannot read `/usage`.
-
-Authentication rate limits are process-local, so use a shared limiter and
-proxy-aware IP handling for multi-worker production. Verification resends are
-also limited to three attempts per normalized email identifier per hour using
-a SHA-256 identifier key; the address itself is not retained in limiter keys.
-
-| Method | Path | Auth | Success | Error statuses |
-| --- | --- | --- | --- | --- |
-| POST | `/register` | none | 201 `RegisterResponse` | 409 duplicate email, 422 validation, 429 rate limit, 403 disallowed Origin |
-| POST | `/login` | none | 200 `UserPublic` + `Set-Cookie: bio_session` | 401 `Invalid email or password.` (generic), 403 `email_verification_required` (no session created) / inactive account / disallowed Origin, 429 |
-| POST | `/logout` | optional cookie | 204, cookie cleared + session revoked | 403 disallowed Origin |
-| GET | `/me` | cookie (verified session) | 200 `UserPublic` | 401 not authenticated / expired, 403 `email_verification_required` |
-| POST | `/verify-email` | none | 200 verified | 400 one generic rejection for invalid/expired/used tokens, 429 |
-| POST | `/resend-verification` | none | 202 always-identical neutral message | 422 validation, 429 |
-
-`RegisterResponse` = `UserPublic` fields + `verification_required: true` +
-`email_delivery: "accepted" | "failed" | "unknown"` — provider API status,
-not mailbox delivery status. A timeout is reported as unknown acceptance.
-`UserPublic` = `{ id, full_name, email, role, is_active, is_email_verified,
-created_at, updated_at }`. Password hashes, session tokens, and
-verification tokens never appear in any response. Role and verification
-status are server-controlled; client fields of those names are ignored.
-
-Sessions: random 256-bit token in a `HttpOnly` cookie; only SHA-256(token)
-plus expiry/revocation is stored in `auth_sessions`. Verification: only
-SHA-256(token) in `auth_email_verification_tokens`; single-use (atomic
-consumption), 30-minute default expiry, resend supersedes older tokens.
-CSRF: `SameSite=Lax` plus an Origin-allowlist check on unsafe methods.
+1. In Mailgun, create a production sending domain you control; do not use a
+   `sandbox...` domain for public users. Choose the domain's US or EU region.
+2. Publish the exact DNS records Mailgun displays for the domain. Mailgun
+   requires SPF and DKIM for sending. MX records are required for inbound mail
+   and can be needed for Mailgun's domain setup; CNAME enables Mailgun tracking.
+   Do not replace existing SPF; merge Mailgun's include into the single SPF
+   record for that hostname. Add DMARC at `_dmarc.<domain>` (start with
+   `p=none`) and strengthen after monitoring alignment.
+3. Wait for Mailgun to show the domain verified and confirm account-level
+   sending is enabled. Sandbox domains authorize only explicitly allowed
+   recipients and are not a production workaround.
+4. Generate a new domain-scoped sending key in Mailgun. Set `MAIL_BACKEND`,
+   `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, `MAILGUN_REGION`,
+   `MAIL_FROM_ADDRESS` (same domain), and optionally `MAIL_FROM_NAME` in
+   `backend/.env` or a secret store. Restart the backend. Never use or commit
+   credentials copied from source examples.
+5. Inspect Mailgun's Events for `accepted`, `delivered`, `failed`, `rejected`,
+   or `complained`. The API's `Queued. Thank you.` response confirms provider
+   acceptance only, not inbox delivery. No delivery webhook is needed to keep
+   verification tokens secure; events are operational diagnostics only.
+6. Test with two consenting mailboxes, verify the second account through its
+   link, and confirm single-use token behavior. Automated tests mock HTTP and
+   do not send email.
 
 ## API — admin (`/api/v1/admin`, Task 005)
 
@@ -270,19 +218,16 @@ UPDATE users SET role = 'admin' WHERE email = '<address>';
   (gitignored). Open the LATEST file — links are written unwrapped, so the
   URL is copyable — and follow it. Full local cycle: register → latest
   `.eml` → click link → sign in.
-- **Resend** (current local configuration): `MAIL_BACKEND=resend` with
-  `MAIL_FROM_ADDRESS=onboarding@resend.dev`. This is the shared testing
-  sender and is not suitable for arbitrary users. Earlier live API responses
-  rejected another recipient; the current send-only key cannot read account
-  domains or delivery events. To send to users, verify a domain you own and
-  use a sender address on it; the production config guard rejects the shared
-  test sender.
+- **Mailgun**: select `MAIL_BACKEND=mailgun` only after configuring a
+  newly generated Mailgun domain sending key and verified production domain.
+  Until then, `console` provides local outbox verification links.
+
 - **Generic SMTP**: `MAIL_BACKEND=smtp` + the `MAIL_*` variables above.
 - Server logs record the email purpose, opaque correlation ID, user UUID,
   provider, provider email ID (when returned), and safe failure category/status
   code. They do not record recipient addresses, tokens, credentials, provider
   response bodies, or raw exception messages. Acceptance is not a delivery
-  confirmation; inspect the message's event timeline in Resend.
+  confirmation; inspect the message's event timeline in Mailgun.
 
 ### Administrative verification of pre-existing accounts (explicit)
 

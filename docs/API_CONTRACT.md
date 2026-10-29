@@ -121,7 +121,7 @@ Request: `{ "email": "jane@example.com" }`.
 
 The same neutral response is used after provider rejection to prevent account
 enumeration. The server records a safe error category and correlation ID for
-diagnostics. Resend attempts are also limited to three per normalized address
+diagnostics. Verification attempts are also limited to three per normalized address
 per hour by default (`VERIFICATION_EMAIL_LIMIT_PER_HOUR`).
 
 ### POST /api/v1/auth/forgot-password

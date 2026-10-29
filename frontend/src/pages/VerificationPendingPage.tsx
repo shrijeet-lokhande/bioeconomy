@@ -94,7 +94,7 @@ export function VerificationPendingPage() {
 
         {registerDelivery === "accepted" ? (
           <p className="form-note" role="status">
-            Resend accepted the verification email for processing to {email}.
+            The email provider accepted the verification message for processing to {email}.
             This does not confirm delivery. Check your inbox and spam folder
             for the verification link.
           </p>

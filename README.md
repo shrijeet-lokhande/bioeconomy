@@ -120,7 +120,7 @@ Authentication endpoints live under `/api/v1/auth` (register, login,
 logout, me, verify-email, resend-verification, forgot-password,
 reset-password). Registration requires email
 confirmation before first sign-in: configure a mail backend (`MAIL_BACKEND`:
-`console` for a local gitignored outbox, `resend`, or `smtp`; see
+  `console` for a local gitignored outbox, `mailgun`, or `smtp`; see
 backend/README.md). Only run this after `alembic upgrade head` — the app
 never creates tables itself.
 

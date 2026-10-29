@@ -3,9 +3,8 @@
 Design:
 - Authentication business logic depends only on EmailSender; provider
   specifics live in the backend classes below.
-- Backends (MAIL_BACKEND env): "console" (dev: writes .eml files to a
-  clearly labeled, gitignored outbox), "smtp" (generic SMTP over
-  STARTTLS/TLS), "resend" (Resend HTTP API).
+- Backends (MAIL_BACKEND env): "console" (dev outbox), "smtp" (generic
+  SMTP over STARTTLS/TLS), and "mailgun" (Mailgun Messages HTTP API).
 - Failures raise EmailDeliveryError and are NEVER reported to callers as a
   successful send.
 - Verification links are built ONLY from the configured APP_BASE_URL —
@@ -265,57 +264,58 @@ class SmtpEmailSender(EmailSender):
         return EmailSendReceipt(provider="smtp")
 
 
-class ResendEmailSender(EmailSender):
-    """Resend (https://resend.com) HTTP API backend.
+class MailgunEmailSender(EmailSender):
+    """Mailgun Messages API client. HTTP acceptance is not inbox delivery."""
 
-    API success means Resend accepted the message for processing. Delivery
-    status must be checked separately in the Resend dashboard/API."""
-
-    API_URL = "https://api.resend.com/emails"
+    US_API = "https://api.mailgun.net"
+    EU_API = "https://api.eu.mailgun.net"
 
     def __init__(self, settings: Settings, http_client: httpx.Client | None = None):
         self._settings = settings
         self._client = http_client
 
+    @property
+    def api_url(self) -> str:
+        base = self.EU_API if self._settings.mailgun_region == "eu" else self.US_API
+        return f"{base}/v3/{self._settings.mailgun_domain}/messages"
+
     def describe(self) -> str:
-        from_masked = bool(self._settings.resend_api_key)
-        return f"resend (key configured: {from_masked})"
+        return f"mailgun ({self._settings.mailgun_region}; domain configured)"
 
     def send(self, message: OutgoingEmail) -> EmailSendReceipt:
         s = self._settings
-        if not s.resend_api_key:
+        if not s.mailgun_api_key or not s.mailgun_domain:
             raise EmailDeliveryError(
-                "Resend backend selected but RESEND_API_KEY is not configured."
+                "Mailgun backend is missing its API key or sending domain.",
+                kind="configuration",
             )
-        payload = {
-            "from": s.mail_from_address,
-            "to": [message.to_address],
-            "subject": message.subject,
-            "text": message.text_body,
-            "html": message.html_body,
-            "tags": [{"name": "correlation_id", "value": message.correlation_id}],
-        }
-        headers = {
-            "Authorization": f"Bearer {s.resend_api_key}",
-            "Content-Type": "application/json",
-            # Resend retains idempotency keys for 24 hours. No automatic retry
-            # is performed; reusing this operation ID is safe if an explicit
-            # retry is added later.
-            "Idempotency-Key": message.correlation_id,
-        }
-        client = self._client or httpx.Client(timeout=15.0)
+        client = self._client or httpx.Client(
+            timeout=httpx.Timeout(15.0, connect=5.0)
+        )
         try:
             response = client.post(
-                self.API_URL, json=payload, headers=headers
+                self.api_url,
+                auth=("api", s.mailgun_api_key),
+                files={
+                    key: (None, value)
+                    for key, value in {
+                        "from": f"{s.mail_from_name} <{s.mail_from_address}>",
+                        "to": message.to_address,
+                        "subject": message.subject,
+                        "text": message.text_body,
+                        "html": message.html_body,
+                        "v:correlation_id": message.correlation_id,
+                        "o:tag": "bioeconomy-transactional",
+                    }.items()
+                },
             )
         except httpx.TimeoutException as exc:
             raise EmailDeliveryError(
-                "Resend request timed out; acceptance is unknown.",
-                kind="timeout",
+                "Mailgun request timed out; acceptance is unknown.", kind="timeout"
             ) from exc
         except httpx.HTTPError as exc:
             raise EmailDeliveryError(
-                "Resend API could not be reached; acceptance is unknown.",
+                "Mailgun API could not be reached; acceptance is unknown.",
                 kind="transport_error",
             ) from exc
         finally:
@@ -323,43 +323,34 @@ class ResendEmailSender(EmailSender):
                 client.close()
 
         if 200 <= response.status_code < 300:
-            provider_email_id: str | None = None
+            provider_email_id = None
             try:
                 response_id = response.json().get("id")
                 if isinstance(response_id, str) and re.fullmatch(
-                    r"[A-Za-z0-9_-]{1,128}", response_id
+                    r"<[A-Za-z0-9_.@+-]{1,248}>", response_id
                 ):
                     provider_email_id = response_id
             except (ValueError, AttributeError):
-                # API success still means accepted. A malformed/missing id is
-                # recorded as unavailable rather than changing the outcome.
                 pass
             return EmailSendReceipt(
-                provider="resend", provider_email_id=provider_email_id
+                provider="mailgun", provider_email_id=provider_email_id
             )
 
-        provider_code: str | None = None
-        try:
-            error_body = response.json()
-            if isinstance(error_body, dict):
-                candidate = error_body.get("name") or error_body.get("code")
-                if isinstance(candidate, str) and re.fullmatch(
-                    r"[A-Za-z0-9_.-]{1,64}", candidate
-                ):
-                    provider_code = candidate
-        except (ValueError, AttributeError):
-            pass
-        if response.status_code == 429:
+        if response.status_code == 401:
+            failure = "authentication"
+        elif response.status_code == 429:
             failure = "rate_limited"
         elif response.status_code == 408 or response.status_code >= 500:
             failure = "transient_provider_error"
         else:
             failure = "provider_rejected"
+        # Do not log or forward Mailgun's response body; it may contain
+        # recipient data or account-specific diagnostics.
         raise EmailDeliveryError(
-            f"Resend did not accept the message (HTTP {response.status_code}).",
+            f"Mailgun did not accept the message (HTTP {response.status_code}).",
             kind=failure,
             status_code=response.status_code,
-            provider_code=provider_code,
+            provider_code=f"http_{response.status_code}",
         )
 
 
@@ -390,11 +381,11 @@ def create_email_sender(settings: Settings | None = None) -> EmailSender:
         return ConsoleEmailSender(chosen.mail_outbox_dir, chosen.mail_from_address)
     if backend == "smtp":
         return SmtpEmailSender(chosen)
-    if backend == "resend":
-        return ResendEmailSender(chosen)
+    if backend == "mailgun":
+        return MailgunEmailSender(chosen)
     raise EmailDeliveryError(
         f"Unsupported MAIL_BACKEND={chosen.mail_backend!r} "
-        "(expected console, smtp, or resend)."
+        "(expected console, smtp, or mailgun)."
     )
 
 

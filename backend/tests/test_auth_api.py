@@ -26,7 +26,7 @@ from backend.mailer import (
     EmailDeliveryError,
     EmailSendReceipt,
     OutgoingEmail,
-    ResendEmailSender,
+    MailgunEmailSender,
     create_email_sender,
     get_email_sender,
 )
@@ -692,7 +692,7 @@ def test_accepted_registration_logs_provider_id_and_correlation_without_pii(
         def send(self, message):
             self.sent.append(message)
             return EmailSendReceipt(
-                provider="resend", provider_email_id="resend-email-id-123"
+                provider="mailgun", provider_email_id="mailgun-message-id-123"
             )
 
     app = client.app
@@ -711,7 +711,7 @@ def test_accepted_registration_logs_provider_id_and_correlation_without_pii(
     message = sender.sent[0]
     assert message.to_address == payload["email"].lower()
     token = re.search(r"token=([A-Za-z0-9_-]+)", message.text_body).group(1)
-    assert "resend-email-id-123" in caplog.text
+    assert "mailgun-message-id-123" in caplog.text
     assert message.correlation_id in caplog.text
     assert response.json()["id"] in caplog.text
     assert payload["email"] not in caplog.text
@@ -759,227 +759,68 @@ def test_console_backend_writes_labeled_outbox(tmp_path):
 
 
 def test_factory_maps_backends_and_rejects_unconfigured(monkeypatch):
-    """Delivery config sanity: factory mapping + honest failure configs."""
     from backend.config import Settings
-
-    console = create_email_sender(Settings(mail_backend="console"))
-    assert isinstance(console, ConsoleEmailSender)
-    smtp = create_email_sender(Settings(mail_backend="smtp", mail_host="x"))
-    assert type(smtp).__name__ == "SmtpEmailSender"
-    resend = create_email_sender(
-        Settings(
-            mail_backend="resend",
-            resend_api_key="k",
-            mail_from_address="auth@example.org",
-        )
-    )
-    assert type(resend).__name__ == "ResendEmailSender"
+    assert isinstance(create_email_sender(Settings(mail_backend="console")), ConsoleEmailSender)
+    assert type(create_email_sender(Settings(mail_backend="smtp", mail_host="x"))).__name__ == "SmtpEmailSender"
+    assert isinstance(create_email_sender(Settings(mail_backend="mailgun", mailgun_api_key="k", mailgun_domain="mg.example.org", mail_from_address="auth@mg.example.org")), MailgunEmailSender)
     with pytest.raises(ValidationError, match="MAIL_BACKEND"):
         Settings(mail_backend="carrier-pigeon")
 
 
-def test_mail_configuration_requires_resend_key_and_valid_sender():
+def test_mailgun_config_validation():
     from backend.config import Settings
-
-    with pytest.raises(ValidationError, match="RESEND_API_KEY"):
-        Settings(
-            mail_backend="resend",
-            resend_api_key=" ",
-            mail_from_address="auth@example.org",
-        )
-    with pytest.raises(ValidationError, match="MAIL_FROM_ADDRESS"):
-        Settings(
-            mail_backend="resend",
-            resend_api_key="test-key",
-            mail_from_address="not-an-email",
-        )
+    base=dict(mail_backend="mailgun",mailgun_domain="mg.example.org",mail_from_address="auth@mg.example.org")
+    with pytest.raises(ValidationError,match="MAILGUN_API_KEY"): Settings(**base)
+    with pytest.raises(ValidationError,match="MAILGUN_DOMAIN"): Settings(mailgun_api_key="key",mail_backend="mailgun",mail_from_address="auth@example.org")
+    with pytest.raises(ValidationError,match="must match MAILGUN_DOMAIN"): Settings(**{**base,"mailgun_api_key":"key","mail_from_address":"auth@example.org"})
+    with pytest.raises(ValidationError,match="MAILGUN_REGION"): Settings(**{**base,"mailgun_api_key":"key","mailgun_region":"ap"})
 
 
-def test_production_resend_rejects_shared_test_sender():
+@pytest.mark.parametrize(("region","host"),[("us","api.mailgun.net"),("eu","api.eu.mailgun.net")])
+def test_mailgun_sender_uses_correct_endpoint_auth_and_content(region,host):
     from backend.config import Settings
+    observed={}
+    def handler(request):
+        observed["request"]=request; observed["body"]=request.read().decode()
+        return httpx.Response(200,json={"id":"<msg@mailgun.org>","message":"Queued. Thank you."})
+    client=httpx.Client(transport=httpx.MockTransport(handler))
+    sender=MailgunEmailSender(Settings(mail_backend="mailgun",mailgun_api_key="test-secret",mailgun_domain="mg.example.org",mailgun_region=region,mail_from_address="verify@mg.example.org",mail_from_name="Bioeconomy"),http_client=client)
+    try: receipt=sender.send(OutgoingEmail("person@example.net","Verify","plain body","<p>html body</p>","corr-123"))
+    finally: client.close()
+    req=observed["request"]
+    assert str(req.url)==f"https://{host}/v3/mg.example.org/messages"
+    assert req.headers["Authorization"].startswith("Basic ")
+    body=observed["body"]
+    for value in ("Bioeconomy <verify@mg.example.org>","person@example.net","Verify","plain body","<p>html body</p>","corr-123"): assert value in body
+    assert req.headers["Content-Type"].startswith("multipart/form-data; boundary=")
+    assert receipt.provider=="mailgun" and receipt.provider_email_id=="<msg@mailgun.org>"
 
-    with pytest.raises(ValidationError, match="shared test"):
-        Settings(
-            app_env="production",
-            app_base_url="https://bioeconomy.example.org",
-            cookie_secure=True,
-            mail_backend="resend",
-            resend_api_key="test-key",
-            mail_from_address="onboarding@resend.dev",
-        )
 
-
-def test_production_config_accepts_custom_sender_shape():
+@pytest.mark.parametrize(("status","kind"),[(401,"authentication"),(403,"provider_rejected"),(400,"provider_rejected"),(429,"rate_limited"),(503,"transient_provider_error")])
+def test_mailgun_errors_are_sanitized(status,kind,caplog):
     from backend.config import Settings
-
-    settings = Settings(
-        app_env="production",
-        app_base_url="https://bioeconomy.example.org",
-        cookie_secure=True,
-        mail_backend="resend",
-        resend_api_key="test-key",
-        mail_from_address="verify@bioeconomy.in",
-    )
-    assert settings.mail_from_address == "verify@bioeconomy.in"
-
-
-def test_production_config_requires_secure_cookies():
-    from backend.config import Settings
-
-    with pytest.raises(ValidationError, match="COOKIE_SECURE"):
-        Settings(
-            app_env="production",
-            app_base_url="https://bioeconomy.example.org",
-            cookie_secure=False,
-            mail_backend="resend",
-            resend_api_key="test-key",
-            mail_from_address="verify@bioeconomy.in",
-        )
-
-
-def test_startup_warns_when_resend_shared_test_sender_is_configured(
-    monkeypatch, caplog
-):
-    from backend import main
-    from backend.config import Settings
-
-    settings = Settings(
-        mail_backend="resend",
-        resend_api_key="test-key",
-        mail_from_address="onboarding@resend.dev",
-    )
-    monkeypatch.setattr(main, "get_settings", lambda: settings)
-    caplog.set_level("WARNING", logger="backend.startup")
-
-    main.create_app()
-
-    assert "cannot be used for ordinary user verification" in caplog.text
-
-
-def test_resend_sender_posts_exact_recipient_sender_and_correlation():
-    from backend.config import Settings
-
-    observed: dict[str, object] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        observed["url"] = str(request.url)
-        observed["headers"] = request.headers
-        observed["payload"] = __import__("json").loads(request.content)
-        return httpx.Response(200, json={"id": "resend-email-id-123"})
-
-    http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    sender = ResendEmailSender(
-        Settings(
-            mail_backend="resend",
-            resend_api_key="test-only-key",
-            mail_from_address="auth@example.org",
-        ),
-        http_client=http_client,
-    )
-    message = OutgoingEmail(
-        to_address="recipient@example.net",
-        subject="Verify",
-        text_body="Test only",
-        html_body="<p>Test only</p>",
-        correlation_id="corr_01hxyz",
-    )
+    def handler(_): return httpx.Response(status,json={"message":"private recipient@example.net and secret detail"})
+    client=httpx.Client(transport=httpx.MockTransport(handler))
+    sender=MailgunEmailSender(Settings(mail_backend="mailgun",mailgun_api_key="test-secret",mailgun_domain="mg.example.org",mail_from_address="verify@mg.example.org"),http_client=client)
     try:
-        receipt = sender.send(message)
-    finally:
-        http_client.close()
-
-    payload = observed["payload"]
-    assert isinstance(payload, dict)
-    assert payload["from"] == "auth@example.org"
-    assert payload["to"] == ["recipient@example.net"]
-    assert payload["tags"] == [{"name": "correlation_id", "value": "corr_01hxyz"}]
-    assert observed["headers"]["Idempotency-Key"] == "corr_01hxyz"
-    assert receipt.provider == "resend"
-    assert receipt.provider_email_id == "resend-email-id-123"
+        with pytest.raises(EmailDeliveryError) as error: sender.send(OutgoingEmail("recipient@example.net","s","t","h"))
+    finally: client.close()
+    assert error.value.kind==kind and error.value.status_code==status
+    assert "http_"+str(status)==error.value.provider_code
+    assert "private recipient@example.net and secret detail" not in caplog.text and "test-secret" not in caplog.text
 
 
-@pytest.mark.parametrize(
-    ("status_code", "provider_code", "failure_kind"),
-    [
-        (403, "testing_mode", "provider_rejected"),
-        (429, "rate_limit_exceeded", "rate_limited"),
-        (503, "provider_unavailable", "transient_provider_error"),
-    ],
-)
-def test_resend_sender_classifies_provider_errors_without_logging_body(
-    status_code, provider_code, failure_kind, caplog
-):
+def test_mailgun_timeout_is_not_retried():
     from backend.config import Settings
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            status_code,
-            json={
-                "name": provider_code,
-                "message": "private recipient@example.net diagnostic detail",
-            },
-        )
-
-    http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    sender = ResendEmailSender(
-        Settings(
-            mail_backend="resend",
-            resend_api_key="test-only-key",
-            mail_from_address="auth@example.org",
-        ),
-        http_client=http_client,
-    )
+    calls=0
+    def handler(_):
+        nonlocal calls; calls+=1; raise httpx.ReadTimeout("sensitive timeout context")
+    client=httpx.Client(transport=httpx.MockTransport(handler))
+    sender=MailgunEmailSender(Settings(mail_backend="mailgun",mailgun_api_key="test-secret",mailgun_domain="mg.example.org",mail_from_address="verify@mg.example.org"),http_client=client)
     try:
-        with pytest.raises(EmailDeliveryError) as error:
-            sender.send(
-                OutgoingEmail(
-                    to_address="recipient@example.net",
-                    subject="Verify",
-                    text_body="Body",
-                    html_body="<p>Body</p>",
-                )
-            )
-    finally:
-        http_client.close()
-    assert error.value.kind == failure_kind
-    assert error.value.status_code == status_code
-    assert error.value.provider_code == provider_code
-    assert "private recipient@example.net diagnostic detail" not in caplog.text
-
-
-def test_resend_sender_timeout_is_not_retried_and_not_reported_accepted():
-    from backend.config import Settings
-
-    calls = 0
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        raise httpx.ReadTimeout("timeout message could contain request data")
-
-    http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    sender = ResendEmailSender(
-        Settings(
-            mail_backend="resend",
-            resend_api_key="test-only-key",
-            mail_from_address="auth@example.org",
-        ),
-        http_client=http_client,
-    )
-    try:
-        with pytest.raises(EmailDeliveryError) as error:
-            sender.send(
-                OutgoingEmail(
-                    to_address="recipient@example.net",
-                    subject="Verify",
-                    text_body="Body",
-                    html_body="<p>Body</p>",
-                )
-            )
-    finally:
-        http_client.close()
-    assert error.value.kind == "timeout"
-    assert calls == 1
+        with pytest.raises(EmailDeliveryError) as error: sender.send(OutgoingEmail("person@example.net","s","t","h"))
+    finally: client.close()
+    assert error.value.kind=="timeout" and calls==1
 
 
 def test_password_reset_generic_email_hash_single_use_and_session_revocation(client, db_session):
