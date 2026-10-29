@@ -23,6 +23,8 @@ from backend.config import get_settings
 from backend.mailer import (
     EmailDeliveryError,
     EmailSender,
+    EmailSendReceipt,
+    OutgoingEmail,
     PasswordResetEmailContext,
     VerificationEmailContext,
     build_password_changed_email,
@@ -46,6 +48,7 @@ from backend.schemas import (
     ForgotPasswordRequest,
     ResetPasswordRequest,
     GenericAuthMessage,
+    EmailDeliveryStatus,
 )
 from backend.security import hash_password, verify_password
 from backend.sessions import SESSION_COOKIE_NAME, SessionService, hash_token
@@ -109,7 +112,7 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 def _send_verification_email(
     user: User, raw_token: str, sender: EmailSender
-) -> str:
+) -> EmailDeliveryStatus:
     """Sends the verification email. Never raises for the "provider
     unavailable" path — failure is reported to the REGISTER caller so it can
     offer resend. Raw token never logged; link only goes into the bodies."""
@@ -123,11 +126,78 @@ def _send_verification_email(
         )
     )
     try:
-        sender.send(outgoing)
-    except EmailDeliveryError as exc:
-        logger.error("Verification email delivery failed for %s: %s", user.email, exc)
-        return "failed"
+        receipt = sender.send(outgoing)
+    except Exception as exc:  # provider failures must leave registration recoverable
+        _log_email_failure("verification", user.id, sender, outgoing, exc)
+        if isinstance(exc, EmailDeliveryError) and exc.kind not in {
+            "timeout",
+            "transport_error",
+        }:
+            return "failed"
+        return "unknown"
+    _log_email_accepted("verification", user.id, sender, outgoing, receipt)
     return "accepted"
+
+
+def _log_email_accepted(
+    purpose: str,
+    user_id,
+    sender: EmailSender,
+    email: OutgoingEmail,
+    receipt: EmailSendReceipt,
+) -> None:
+    logger.info(
+        "MAIL outcome=accepted purpose=%s correlation_id=%s user_id=%s "
+        "provider=%s provider_email_id=%s",
+        purpose,
+        email.correlation_id,
+        user_id,
+        receipt.provider,
+        receipt.provider_email_id,
+    )
+
+
+def _email_provider_name(sender: EmailSender) -> str:
+    # `describe()` may include a path or SMTP host, neither of which is needed
+    # on the normal email-operation log line.
+    return sender.describe().split(maxsplit=1)[0]
+
+
+def _log_email_failure(
+    purpose: str,
+    user_id,
+    sender: EmailSender,
+    email: OutgoingEmail,
+    error: Exception,
+) -> None:
+    if isinstance(error, EmailDeliveryError):
+        outcome = (
+            "unknown"
+            if error.kind in {"timeout", "transport_error"}
+            else "failed"
+        )
+        logger.error(
+            "MAIL outcome=%s purpose=%s correlation_id=%s user_id=%s "
+            "provider=%s failure=%s http_status=%s provider_code=%s",
+            outcome,
+            purpose,
+            email.correlation_id,
+            user_id,
+            _email_provider_name(sender),
+            error.kind,
+            error.status_code,
+            error.provider_code,
+        )
+        return
+    logger.error(
+        "MAIL outcome=unknown purpose=%s correlation_id=%s user_id=%s "
+        "provider=%s failure=unexpected error_type=%s",
+        purpose,
+        email.correlation_id,
+        user_id,
+        _email_provider_name(sender),
+        type(error).__name__,
+    )
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED, response_model=RegisterResponse)
@@ -303,6 +373,13 @@ def resend_verification(
 ) -> ResendVerificationResponse:
     _untrusted_origin(request)
     enforce_rate_limit(request, "resend")
+    settings = get_settings()
+    enforce_identifier_rate_limit(
+        payload.email.lower(),
+        "resend-verification",
+        settings.verification_email_limit_per_hour,
+        3600,
+    )
 
     user = db.scalar(select(User).where(User.email == payload.email))
     # The response is ALWAYS this neutral message: existence, verified state,
@@ -338,16 +415,21 @@ def forgot_password(payload: ForgotPasswordRequest, request: Request, background
             reset_url=f"{settings.app_base_url.rstrip('/')}/#/reset-password?token={raw}",
             expires_in_minutes=settings.password_reset_token_minutes,
         ))
-        background_tasks.add_task(_send_reset_email, sender, email)
+        background_tasks.add_task(
+            _send_reset_email, sender, email, user.id, "password_reset"
+        )
     return GenericAuthMessage(message=PASSWORD_RESET_NEUTRAL_MESSAGE)
 
 
-def _send_reset_email(sender: EmailSender, email) -> None:
+def _send_reset_email(
+    sender: EmailSender, email: OutgoingEmail, user_id, purpose: str
+) -> None:
     try:
-        sender.send(email)
-        logger.info("Password reset email accepted")
-    except EmailDeliveryError:
-        logger.error("Password reset email delivery failed")
+        receipt = sender.send(email)
+    except Exception as exc:  # keep neutral reset responses and log diagnostics
+        _log_email_failure(purpose, user_id, sender, email, exc)
+    else:
+        _log_email_accepted(purpose, user_id, sender, email, receipt)
 
 
 @router.post("/reset-password", response_model=GenericAuthMessage)
@@ -366,7 +448,10 @@ def reset_password(payload: ResetPasswordRequest, request: Request,
     logger.info("Password reset completed; active sessions revoked")
     user = db.get(User, user_id) if user_id is not None else None
     if user is not None:
-        background_tasks.add_task(_send_reset_email, sender, build_password_changed_email(user.email, user.full_name))
+        email = build_password_changed_email(user.email, user.full_name)
+        background_tasks.add_task(
+            _send_reset_email, sender, email, user.id, "password_changed"
+        )
     return GenericAuthMessage(message="Password updated. Sign in with your new password.")
 
 

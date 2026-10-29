@@ -23,12 +23,16 @@ Request:
   chars, normalized to lowercase server-side. Password: 10–200 chars.
 - Unknown/extra JSON fields (e.g. `role`, `is_active`, `is_email_verified`)
   are ignored.
-- A verification email is sent to the address (default expiry
-  `VERIFICATION_TOKEN_MINUTES = 30`).
+- The configured provider is asked to send a verification email to the
+  normalized address (default expiry `VERIFICATION_TOKEN_MINUTES = 30`).
 - 201 → `RegisterResponse`; `Set-Cookie` is NOT issued (no auto sign-in).
-  `email_delivery` is honest: `"accepted"` when the configured provider took
-  the message, `"failed"` when it did not (the account still exists and is
-  recoverable through resend).
+  `email_delivery` is honest: `"accepted"` when the provider API accepted the
+  message for processing, `"failed"` when it did not (the account still
+  exists and is recoverable through resend), and `"unknown"` when a timeout
+  or transport error leaves API acceptance undetermined. `"accepted"` is NOT
+  a delivery confirmation; inspect the provider's event log for delivery
+  status. For `"unknown"`, check inbox/spam before resending because the
+  provider may have accepted the original request.
 - 409 → `{ "detail": "This email address is already registered." }`
 - 422 → FastAPI validation errors; 429 → rate limit; 403 → disallowed Origin.
 
@@ -114,6 +118,29 @@ Request: `{ "email": "jane@example.com" }`.
   Delivery problems are observable server-side only (logs). A new token
   supersedes the account's previous unconsumed tokens.
 - 422 → invalid email shape; 429 → rate limit; 403 → disallowed Origin.
+
+The same neutral response is used after provider rejection to prevent account
+enumeration. The server records a safe error category and correlation ID for
+diagnostics. Resend attempts are also limited to three per normalized address
+per hour by default (`VERIFICATION_EMAIL_LIMIT_PER_HOUR`).
+
+### POST /api/v1/auth/forgot-password
+
+Request: `{ "email": "jane@example.com" }`. Always returns the same 202
+message for a missing, ineligible, or eligible account. Active, verified
+accounts receive a single-use reset link when the provider accepts the send.
+The reset token is random, expires after `PASSWORD_RESET_TOKEN_MINUTES` (30 by
+default), and only its SHA-256 hash is stored. Per-IP and per-normalized-address
+rate limits apply. The neutral response does not confirm provider acceptance
+or mailbox delivery.
+
+### POST /api/v1/auth/reset-password
+
+Request: `{ "token": "<raw reset token>", "password": "<new password>" }`.
+Success returns 200 and revokes all existing database sessions for that user.
+Invalid, expired, consumed, or revoked tokens return one generic 400. The raw
+token is never persisted or logged; the frontend removes it from the address
+bar before submitting it.
 
 ### Response schemas
 

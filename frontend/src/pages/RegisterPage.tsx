@@ -46,7 +46,7 @@ export function RegisterPage() {
       });
       setPendingVerification(
         created.email,
-        created.email_delivery === "failed" ? "failed" : "accepted",
+        created.email_delivery,
       );
       // Route to the verification-pending screen (hash router picks up
       // the change through the hashchange listener).

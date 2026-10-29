@@ -7,6 +7,7 @@ escalation through registration payloads.
 """
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
@@ -15,6 +16,7 @@ PASSWORD_MIN_LENGTH = 10
 PASSWORD_MAX_LENGTH = 200
 NAME_MAX_LENGTH = 200
 EMAIL_MAX_LENGTH = 320
+EmailDeliveryStatus = Literal["accepted", "failed", "unknown"]
 
 
 class RegisterRequest(BaseModel):
@@ -57,7 +59,7 @@ class RegisterResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     verification_required: bool = True
-    email_delivery: str = "accepted"  # "accepted" | "failed"
+    email_delivery: EmailDeliveryStatus = "accepted"
 
 
 class LoginRequest(BaseModel):

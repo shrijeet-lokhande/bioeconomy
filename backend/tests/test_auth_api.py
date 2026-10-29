@@ -13,8 +13,10 @@ import threading
 import uuid
 from email.message import EmailMessage
 
+import httpx
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from backend.models import AuthEmailVerificationToken, AuthPasswordResetToken, AuthSession, User
@@ -22,6 +24,9 @@ from backend.mailer import (
     CapturingEmailSender,
     ConsoleEmailSender,
     EmailDeliveryError,
+    EmailSendReceipt,
+    OutgoingEmail,
+    ResendEmailSender,
     create_email_sender,
     get_email_sender,
 )
@@ -588,6 +593,35 @@ def test_v12_resend_neutral_and_rate_limiting(client, db_session, monkeypatch):
         get_settings.cache_clear()
 
 
+def test_resend_verification_is_rate_limited_per_normalized_email(
+    client, db_session, monkeypatch
+):
+    _, payload = register(client)
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "1")
+    monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "100")
+    monkeypatch.setenv("VERIFICATION_EMAIL_LIMIT_PER_HOUR", "1")
+    from backend.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        before = len(client.mail_capture.sent)  # type: ignore[attr-defined]
+        first = client.post(
+            "/api/v1/auth/resend-verification",
+            json={"email": payload["email"].upper()},
+        )
+        second = client.post(
+            "/api/v1/auth/resend-verification",
+            json={"email": payload["email"]},
+        )
+        assert first.status_code == 202
+        assert second.status_code == 429
+        assert len(client.mail_capture.sent) == before + 1  # type: ignore[attr-defined]
+    finally:
+        get_settings.cache_clear()
+        monkeypatch.undo()
+        get_settings.cache_clear()
+
+
 def test_v13_provider_failure_handled_honestly(client, db_session):
     """V13: failed provider = registration still succeeds but is reported
     as failed; nothing pretends delivery happened; resend stays neutral."""
@@ -613,6 +647,75 @@ def test_v13_provider_failure_handled_honestly(client, db_session):
         assert failing.sent == []
     finally:
         app.dependency_overrides[get_email_sender] = original
+
+
+def test_registration_reports_timeout_as_unknown_and_remains_recoverable(
+    client, db_session, caplog
+):
+    class TimeoutSender(CapturingEmailSender):
+        def send(self, message):
+            self.sent.append(message)
+            raise EmailDeliveryError("acceptance cannot be determined", kind="timeout")
+
+    app = client.app
+    sender = TimeoutSender()
+    original = app.dependency_overrides[get_email_sender]
+    app.dependency_overrides[get_email_sender] = lambda: sender
+    caplog.set_level("ERROR", logger="backend.auth")
+    try:
+        response, payload = register(client)
+    finally:
+        app.dependency_overrides[get_email_sender] = original
+
+    assert response.status_code == 201
+    assert response.json()["email_delivery"] == "unknown"
+    assert len(sender.sent) == 1
+    message = sender.sent[0]
+    token = re.search(r"token=([A-Za-z0-9_-]+)", message.text_body).group(1)
+    user = db_session.scalar(select(User).where(User.email == payload["email"]))
+    saved_token = db_session.scalar(
+        select(AuthEmailVerificationToken).where(
+            AuthEmailVerificationToken.user_id == user.id
+        )
+    )
+    assert saved_token.token_hash == hash_token(token)
+    assert "outcome=unknown" in caplog.text
+    assert message.correlation_id in caplog.text
+    assert payload["email"] not in caplog.text
+    assert token not in caplog.text
+
+
+def test_accepted_registration_logs_provider_id_and_correlation_without_pii(
+    client, caplog
+):
+    class ReceiptSender(CapturingEmailSender):
+        def send(self, message):
+            self.sent.append(message)
+            return EmailSendReceipt(
+                provider="resend", provider_email_id="resend-email-id-123"
+            )
+
+    app = client.app
+    sender = ReceiptSender()
+    original = app.dependency_overrides[get_email_sender]
+    app.dependency_overrides[get_email_sender] = lambda: sender
+    caplog.set_level("INFO", logger="backend.auth")
+    try:
+        response, payload = register(client)
+    finally:
+        app.dependency_overrides[get_email_sender] = original
+
+    assert response.status_code == 201
+    assert response.json()["email_delivery"] == "accepted"
+    assert len(sender.sent) == 1
+    message = sender.sent[0]
+    assert message.to_address == payload["email"].lower()
+    token = re.search(r"token=([A-Za-z0-9_-]+)", message.text_body).group(1)
+    assert "resend-email-id-123" in caplog.text
+    assert message.correlation_id in caplog.text
+    assert response.json()["id"] in caplog.text
+    assert payload["email"] not in caplog.text
+    assert token not in caplog.text
 
 
 def test_v14_existing_accounts_stay_unverified(db_session):
@@ -664,15 +767,219 @@ def test_factory_maps_backends_and_rejects_unconfigured(monkeypatch):
     smtp = create_email_sender(Settings(mail_backend="smtp", mail_host="x"))
     assert type(smtp).__name__ == "SmtpEmailSender"
     resend = create_email_sender(
-        Settings(mail_backend="resend", resend_api_key="k")
+        Settings(
+            mail_backend="resend",
+            resend_api_key="k",
+            mail_from_address="auth@example.org",
+        )
     )
     assert type(resend).__name__ == "ResendEmailSender"
-    with pytest.raises(EmailDeliveryError):
-        raise_or_fail = create_email_sender(Settings(mail_backend="carrier-pigeon"))
-        raise_or_fail.send(
-            type("M", (), {"to_address": "a@b.c", "subject": "s",
-                          "text_body": "t", "html_body": "h"})()
+    with pytest.raises(ValidationError, match="MAIL_BACKEND"):
+        Settings(mail_backend="carrier-pigeon")
+
+
+def test_mail_configuration_requires_resend_key_and_valid_sender():
+    from backend.config import Settings
+
+    with pytest.raises(ValidationError, match="RESEND_API_KEY"):
+        Settings(
+            mail_backend="resend",
+            resend_api_key=" ",
+            mail_from_address="auth@example.org",
         )
+    with pytest.raises(ValidationError, match="MAIL_FROM_ADDRESS"):
+        Settings(
+            mail_backend="resend",
+            resend_api_key="test-key",
+            mail_from_address="not-an-email",
+        )
+
+
+def test_production_resend_rejects_shared_test_sender():
+    from backend.config import Settings
+
+    with pytest.raises(ValidationError, match="shared test"):
+        Settings(
+            app_env="production",
+            app_base_url="https://bioeconomy.example.org",
+            cookie_secure=True,
+            mail_backend="resend",
+            resend_api_key="test-key",
+            mail_from_address="onboarding@resend.dev",
+        )
+
+
+def test_production_config_accepts_custom_sender_shape():
+    from backend.config import Settings
+
+    settings = Settings(
+        app_env="production",
+        app_base_url="https://bioeconomy.example.org",
+        cookie_secure=True,
+        mail_backend="resend",
+        resend_api_key="test-key",
+        mail_from_address="verify@bioeconomy.in",
+    )
+    assert settings.mail_from_address == "verify@bioeconomy.in"
+
+
+def test_production_config_requires_secure_cookies():
+    from backend.config import Settings
+
+    with pytest.raises(ValidationError, match="COOKIE_SECURE"):
+        Settings(
+            app_env="production",
+            app_base_url="https://bioeconomy.example.org",
+            cookie_secure=False,
+            mail_backend="resend",
+            resend_api_key="test-key",
+            mail_from_address="verify@bioeconomy.in",
+        )
+
+
+def test_startup_warns_when_resend_shared_test_sender_is_configured(
+    monkeypatch, caplog
+):
+    from backend import main
+    from backend.config import Settings
+
+    settings = Settings(
+        mail_backend="resend",
+        resend_api_key="test-key",
+        mail_from_address="onboarding@resend.dev",
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    caplog.set_level("WARNING", logger="backend.startup")
+
+    main.create_app()
+
+    assert "cannot be used for ordinary user verification" in caplog.text
+
+
+def test_resend_sender_posts_exact_recipient_sender_and_correlation():
+    from backend.config import Settings
+
+    observed: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["url"] = str(request.url)
+        observed["headers"] = request.headers
+        observed["payload"] = __import__("json").loads(request.content)
+        return httpx.Response(200, json={"id": "resend-email-id-123"})
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    sender = ResendEmailSender(
+        Settings(
+            mail_backend="resend",
+            resend_api_key="test-only-key",
+            mail_from_address="auth@example.org",
+        ),
+        http_client=http_client,
+    )
+    message = OutgoingEmail(
+        to_address="recipient@example.net",
+        subject="Verify",
+        text_body="Test only",
+        html_body="<p>Test only</p>",
+        correlation_id="corr_01hxyz",
+    )
+    try:
+        receipt = sender.send(message)
+    finally:
+        http_client.close()
+
+    payload = observed["payload"]
+    assert isinstance(payload, dict)
+    assert payload["from"] == "auth@example.org"
+    assert payload["to"] == ["recipient@example.net"]
+    assert payload["tags"] == [{"name": "correlation_id", "value": "corr_01hxyz"}]
+    assert observed["headers"]["Idempotency-Key"] == "corr_01hxyz"
+    assert receipt.provider == "resend"
+    assert receipt.provider_email_id == "resend-email-id-123"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "provider_code", "failure_kind"),
+    [
+        (403, "testing_mode", "provider_rejected"),
+        (429, "rate_limit_exceeded", "rate_limited"),
+        (503, "provider_unavailable", "transient_provider_error"),
+    ],
+)
+def test_resend_sender_classifies_provider_errors_without_logging_body(
+    status_code, provider_code, failure_kind, caplog
+):
+    from backend.config import Settings
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            json={
+                "name": provider_code,
+                "message": "private recipient@example.net diagnostic detail",
+            },
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    sender = ResendEmailSender(
+        Settings(
+            mail_backend="resend",
+            resend_api_key="test-only-key",
+            mail_from_address="auth@example.org",
+        ),
+        http_client=http_client,
+    )
+    try:
+        with pytest.raises(EmailDeliveryError) as error:
+            sender.send(
+                OutgoingEmail(
+                    to_address="recipient@example.net",
+                    subject="Verify",
+                    text_body="Body",
+                    html_body="<p>Body</p>",
+                )
+            )
+    finally:
+        http_client.close()
+    assert error.value.kind == failure_kind
+    assert error.value.status_code == status_code
+    assert error.value.provider_code == provider_code
+    assert "private recipient@example.net diagnostic detail" not in caplog.text
+
+
+def test_resend_sender_timeout_is_not_retried_and_not_reported_accepted():
+    from backend.config import Settings
+
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("timeout message could contain request data")
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    sender = ResendEmailSender(
+        Settings(
+            mail_backend="resend",
+            resend_api_key="test-only-key",
+            mail_from_address="auth@example.org",
+        ),
+        http_client=http_client,
+    )
+    try:
+        with pytest.raises(EmailDeliveryError) as error:
+            sender.send(
+                OutgoingEmail(
+                    to_address="recipient@example.net",
+                    subject="Verify",
+                    text_body="Body",
+                    html_body="<p>Body</p>",
+                )
+            )
+    finally:
+        http_client.close()
+    assert error.value.kind == "timeout"
+    assert calls == 1
 
 
 def test_password_reset_generic_email_hash_single_use_and_session_revocation(client, db_session):

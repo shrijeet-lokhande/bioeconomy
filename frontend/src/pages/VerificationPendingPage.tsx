@@ -26,7 +26,11 @@ export function VerificationPendingPage() {
       ? "The verification email could not be sent just now "
         + "(delivery problem at the mail provider). You can request a new one "
         + "below, or try again later."
-      : null;
+      : registerDelivery === "unknown"
+        ? "The mail provider did not confirm whether it accepted the request. "
+          + "Check your inbox and spam folder first. If no email arrives, "
+          + "request another link below; a resend replaces the previous link."
+        : null;
 
   const [resend, setResend] = useState<ResendResult>({ state: "idle", message: null });
 
@@ -89,14 +93,18 @@ export function VerificationPendingPage() {
         </header>
 
         {registerDelivery === "accepted" ? (
-          <p className="form-success" role="status">
-            A verification email was sent to {email}. Open the link in that
-            email to finish setting up your account.
+          <p className="form-note" role="status">
+            Resend accepted the verification email for processing to {email}.
+            This does not confirm delivery. Check your inbox and spam folder
+            for the verification link.
           </p>
         ) : null}
 
         {deliveryNote !== null ? (
-          <p className="form-error" role="alert">
+          <p
+            className={registerDelivery === "failed" ? "form-error" : "form-note"}
+            role={registerDelivery === "failed" ? "alert" : "status"}
+          >
             {deliveryNote}
           </p>
         ) : null}

@@ -10,7 +10,7 @@
 const PENDING_EMAIL_KEY = "bioeconomy.pending-verification-email";
 const PENDING_DELIVERY_KEY = "bioeconomy.pending-verification-delivery";
 
-export type PendingDelivery = "accepted" | "failed";
+export type PendingDelivery = "accepted" | "failed" | "unknown";
 
 export function setPendingVerification(
   email: string,
@@ -40,7 +40,9 @@ export function readPendingVerification(): {
     }
     const deliveryRaw = sessionStorage.getItem(PENDING_DELIVERY_KEY);
     const delivery: PendingDelivery | null =
-      deliveryRaw === "failed" ? "failed" : deliveryRaw === "accepted" ? "accepted" : null;
+      deliveryRaw === "failed" || deliveryRaw === "accepted" || deliveryRaw === "unknown"
+        ? deliveryRaw
+        : null;
     return { email, delivery };
   } catch {
     return null;

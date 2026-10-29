@@ -17,13 +17,15 @@ Design:
 
 import logging
 import pathlib
+import re
 import smtplib
 import ssl
 from html import escape as html_escape
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email import policy as email_policy
 from email.message import EmailMessage as MIMEMessage
+from uuid import uuid4
 
 import httpx
 from smtplib import SMTPAuthenticationError, SMTPException
@@ -34,7 +36,20 @@ logger = logging.getLogger("backend.mailer")
 
 
 class EmailDeliveryError(Exception):
-    """Raised when the provider did not accept the message for delivery."""
+    """Safe, structured failure raised when a provider did not accept mail."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "provider_error",
+        status_code: int | None = None,
+        provider_code: str | None = None,
+    ):
+        super().__init__(message)
+        self.kind = kind
+        self.status_code = status_code
+        self.provider_code = provider_code
 
 
 @dataclass(frozen=True)
@@ -43,6 +58,17 @@ class OutgoingEmail:
     subject: str
     text_body: str
     html_body: str
+    # A random, non-secret identifier used for application/provider
+    # correlation. It is never derived from user data or authentication data.
+    correlation_id: str = field(default_factory=lambda: uuid4().hex)
+
+
+@dataclass(frozen=True)
+class EmailSendReceipt:
+    """Confirms provider acceptance, never mailbox delivery."""
+
+    provider: str
+    provider_email_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,7 +162,7 @@ def verification_url(base_url: str, raw_token: str) -> str:
 class EmailSender:
     """Interface implemented by every delivery backend."""
 
-    def send(self, message: OutgoingEmail) -> None:
+    def send(self, message: OutgoingEmail) -> EmailSendReceipt:
         raise NotImplementedError
 
     def describe(self) -> str:  # human-safe backend name for logging/responses
@@ -162,7 +188,7 @@ class ConsoleEmailSender(EmailSender):
     def describe(self) -> str:
         return f"console ({self._path})"
 
-    def send(self, message: OutgoingEmail) -> None:
+    def send(self, message: OutgoingEmail) -> EmailSendReceipt:
         mime = MIMEMessage(policy=self._policy)
         mime["From"] = self._from
         mime["To"] = message.to_address
@@ -173,11 +199,10 @@ class ConsoleEmailSender(EmailSender):
         target = self._path / f"{stamped}.eml"
         target.write_bytes(mime.as_bytes())
         logger.info(
-            "MAIL[console] verification email written to outbox for %s "
-            "(subject: %s)",
-            message.to_address,
-            message.subject,
+            "MAIL[console] email written to outbox correlation_id=%s",
+            message.correlation_id,
         )
+        return EmailSendReceipt(provider="console")
 
 
 class SmtpEmailSender(EmailSender):
@@ -193,10 +218,12 @@ class SmtpEmailSender(EmailSender):
     def describe(self) -> str:
         return f"smtp ({self._settings.mail_host}:{self._settings.mail_port})"
 
-    def send(self, message: OutgoingEmail) -> None:
+    def send(self, message: OutgoingEmail) -> EmailSendReceipt:
         s = self._settings
         if not s.mail_host:
-            raise EmailDeliveryError("SMTP backend configured without MAIL_HOST.")
+            raise EmailDeliveryError(
+                "SMTP backend is missing configuration.", kind="configuration"
+            )
         mime = MIMEMessage()
         mime["From"] = s.mail_from_address
         mime["To"] = message.to_address
@@ -210,8 +237,8 @@ class SmtpEmailSender(EmailSender):
                     server.ehlo()
                     if not server.has_extn("starttls"):
                         raise EmailDeliveryError(
-                            "SMTP server does not support STARTTLS while "
-                            "MAIL_USE_TLS=1."
+                            "SMTP server does not support required STARTTLS.",
+                            kind="tls_unavailable",
                         )
                     server.starttls(context=ssl.create_default_context())
                     server.ehlo()
@@ -220,23 +247,29 @@ class SmtpEmailSender(EmailSender):
                         server.login(s.mail_username, s.mail_password)
                     except SMTPAuthenticationError as exc:
                         raise EmailDeliveryError(
-                            "SMTP authentication failed — check MAIL_USERNAME/"
-                            "MAIL_PASSWORD."
+                            "SMTP authentication failed; check mail credentials.",
+                            kind="authentication",
                         ) from exc
                 server.send_message(mime)
+        except EmailDeliveryError:
+            raise
         except SMTPException as exc:
-            logger.warning("SMTP delivery failed: %s", exc)
-            raise EmailDeliveryError(f"SMTP delivery failed: {exc}") from exc
+            raise EmailDeliveryError(
+                "SMTP server rejected or failed to accept the message.",
+                kind="smtp_error",
+            ) from exc
+        except OSError as exc:
+            raise EmailDeliveryError(
+                "SMTP server could not be reached.", kind="transport_error"
+            ) from exc
+        return EmailSendReceipt(provider="smtp")
 
 
 class ResendEmailSender(EmailSender):
     """Resend (https://resend.com) HTTP API backend.
 
-    Behavior of the provider (documented, observed):
-    - Accounts without a verified domain may send only to the account
-      owner's own email address (HTTP 403, "testing" restriction).
-    - The recommended start address for testing is onboarding@resend.dev.
-    A rejection is surfaced as EmailDeliveryError — never as success."""
+    API success means Resend accepted the message for processing. Delivery
+    status must be checked separately in the Resend dashboard/API."""
 
     API_URL = "https://api.resend.com/emails"
 
@@ -248,7 +281,7 @@ class ResendEmailSender(EmailSender):
         from_masked = bool(self._settings.resend_api_key)
         return f"resend (key configured: {from_masked})"
 
-    def send(self, message: OutgoingEmail) -> None:
+    def send(self, message: OutgoingEmail) -> EmailSendReceipt:
         s = self._settings
         if not s.resend_api_key:
             raise EmailDeliveryError(
@@ -260,43 +293,73 @@ class ResendEmailSender(EmailSender):
             "subject": message.subject,
             "text": message.text_body,
             "html": message.html_body,
+            "tags": [{"name": "correlation_id", "value": message.correlation_id}],
         }
         headers = {
             "Authorization": f"Bearer {s.resend_api_key}",
             "Content-Type": "application/json",
+            # Resend retains idempotency keys for 24 hours. No automatic retry
+            # is performed; reusing this operation ID is safe if an explicit
+            # retry is added later.
+            "Idempotency-Key": message.correlation_id,
         }
         client = self._client or httpx.Client(timeout=15.0)
         try:
             response = client.post(
                 self.API_URL, json=payload, headers=headers
             )
-        except httpx.HTTPError as exc:
-            logger.warning("Resend delivery transport error: %s", exc)
+        except httpx.TimeoutException as exc:
             raise EmailDeliveryError(
-                "Resend API is unreachable — delivery has NOT been confirmed."
+                "Resend request timed out; acceptance is unknown.",
+                kind="timeout",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise EmailDeliveryError(
+                "Resend API could not be reached; acceptance is unknown.",
+                kind="transport_error",
             ) from exc
         finally:
             if self._client is None:
                 client.close()
 
-        if response.status_code in (200, 201):
-            logger.info(
-                "MAIL[resend] message accepted (subject: %s)", message.subject,
+        if 200 <= response.status_code < 300:
+            provider_email_id: str | None = None
+            try:
+                response_id = response.json().get("id")
+                if isinstance(response_id, str) and re.fullmatch(
+                    r"[A-Za-z0-9_-]{1,128}", response_id
+                ):
+                    provider_email_id = response_id
+            except (ValueError, AttributeError):
+                # API success still means accepted. A malformed/missing id is
+                # recorded as unavailable rather than changing the outcome.
+                pass
+            return EmailSendReceipt(
+                provider="resend", provider_email_id=provider_email_id
             )
-            return
 
+        provider_code: str | None = None
         try:
-            detail = response.json().get("message", "")
-        except Exception:  # noqa: BLE001 — provider error body is advisory
-            detail = ""
-        logger.warning(
-            "Resend delivery rejected (HTTP %s): %s",
-            response.status_code,
-            detail or "no provider detail",
-        )
+            error_body = response.json()
+            if isinstance(error_body, dict):
+                candidate = error_body.get("name") or error_body.get("code")
+                if isinstance(candidate, str) and re.fullmatch(
+                    r"[A-Za-z0-9_.-]{1,64}", candidate
+                ):
+                    provider_code = candidate
+        except (ValueError, AttributeError):
+            pass
+        if response.status_code == 429:
+            failure = "rate_limited"
+        elif response.status_code == 408 or response.status_code >= 500:
+            failure = "transient_provider_error"
+        else:
+            failure = "provider_rejected"
         raise EmailDeliveryError(
-            f"Resend rejected the message (HTTP {response.status_code})."
-            + (f" Provider said: {detail}" if detail else "")
+            f"Resend did not accept the message (HTTP {response.status_code}).",
+            kind=failure,
+            status_code=response.status_code,
+            provider_code=provider_code,
         )
 
 
@@ -311,10 +374,11 @@ class CapturingEmailSender(EmailSender):
     def describe(self) -> str:
         return "capturing (tests)"
 
-    def send(self, message: OutgoingEmail) -> None:
+    def send(self, message: OutgoingEmail) -> EmailSendReceipt:
         if self._fail:
             raise EmailDeliveryError("Capturing sender configured to fail.")
         self.sent.append(message)
+        return EmailSendReceipt(provider="capturing")
 
 
 def create_email_sender(settings: Settings | None = None) -> EmailSender:

@@ -43,7 +43,8 @@ not aspirational: items marked "deferred" are not implemented.
 - **No privilege escalation**: role/is_active are server constants; client
   fields of those names are ignored (tested).
 - **Uniqueness/abuse**: process-local rate limiting (default 5/min per IP)
-  on register, login, verify-email, and resend-verification.
+  on register, login, verify-email, and resend-verification; verification
+  resend also allows at most three attempts per normalized address per hour.
 - **Secrets**: all credentials come from environment variables
   (`backend/.env`, gitignored). `.env.example` contains placeholders only.
 
@@ -78,15 +79,44 @@ not aspirational: items marked "deferred" are not implemented.
   token from the URL (`history.replaceState`) as soon as it is read, so it
   does not linger in the address bar or browser history.
 - **Provider failures are never claimed as success**: the register response
-  reports honest `email_delivery: "accepted" | "failed"`; resend-verification
-  is neutral (202) by design and does not report delivery either way.
-- **Mail provider reality (documented behavior of the configured Resend
-  account)**: without a verified domain, Resend delivers only to the account
-  owner's own mailbox and rejects other recipients (HTTP 403/422). These
-  rejections surface honestly as `email_delivery: "failed"` — they are
-  provider-side restrictions, not silent drop. To deliver to arbitrary
-  recipients, verify a domain at resend.com/domains and set
-  `MAIL_FROM_ADDRESS` to an address on that domain.
+  reports `email_delivery: "accepted" | "failed" | "unknown"`; timeouts
+  and transport failures remain unknown because Resend may have accepted a
+  request whose response was lost. Resend-verification is neutral (202) by
+  design and does not report delivery either way.
+- **Resend sender requirement**: `onboarding@resend.dev` is a shared testing
+  sender, not an arbitrary-recipient production sender. Resend's current docs
+  require an owned verified domain for ordinary sender addresses. Earlier
+  live provider responses for this project's non-owner recipient were HTTP
+  403/422, while a test-recipient POST was accepted; the account restriction
+  was therefore provider-side, not a broken recipient field or token flow.
+  The send-only key cannot read `/domains`, `/emails`, or `/usage` (HTTP 401
+  observed 2026-10-30), so the current account's domain status, historical
+  delivery events, and quota are not asserted here. The operator must confirm
+  them in the Resend dashboard.
+- **Production config guard**: `APP_ENV=production` requires `COOKIE_SECURE=1`,
+  a non-console backend and HTTPS `APP_BASE_URL`; shared test and placeholder
+  sender domains are rejected. A sender address being configured does not prove
+  its domain is verified; deployment requires Resend to show sending as
+  verified. DNS values are unique per domain and must be copied from the
+  dashboard. Add the shown DKIM/SPF (and return-path records if requested).
+  DMARC is separate and strongly recommended, initially `p=none` while
+  monitoring alignment.
+- **Acceptance versus delivery**: a 2xx response and email ID mean Resend
+  accepted the API request, not that the recipient's mailbox delivered it.
+  The service records a random correlation ID and provider email ID when
+  available, and reports only safe error categories/status/code. It never
+  logs recipients, verification/reset tokens, credentials, provider response
+  bodies, or exception text. HTTP timeouts are acceptance-unknown and are not
+  automatically retried. The registration UI tells users to check their
+  inbox/spam before resending in this state. Use Resend's Emails event timeline to distinguish
+  `email.sent`, `email.delivered`, `email.bounced`,
+  `email.delivery_delayed`, `email.complained`, `email.failed`, and
+  `email.suppressed`. A delivery event does not guarantee inbox placement.
+- **Recovery after send failure**: registration persists the unverified user
+  and one hashed, expiring token before sending; it does not delete the account
+  after provider failure. Resend replaces the prior token, keeps the same
+  neutral non-enumerating response, and is rate-limited both per IP and per
+  normalized email. Provider errors do not become a false success.
 
 ## Admin authorization (Task 005 — implemented and verified 2026-10-24)
 

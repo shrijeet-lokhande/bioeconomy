@@ -28,8 +28,8 @@ rotate it since it passed through chat history.
   AI-assisted insights.
 - Guiding principle: TRUSTWORTHY DATA FIRST, USEFUL DECISIONS SECOND.
   Honesty rules in force: never claim unimplemented things; the
-  register/response UI reports real email-delivery status
-  (accepted/failed) and never pretends a message was sent.
+  register/response UI reports provider status
+  (accepted/failed/unknown) and never pretends that acceptance proves delivery.
 
 ======================================================================
 2. FULL-SYSTEM ARCHITECTURE (current state)
@@ -196,8 +196,8 @@ docs/CURRENT_STATE.md + docs/SECURITY.md + backend/README.md.
   (scope resend) and only issues+sends when account exists+unverified.
 - Register updated: create user unverified -> issue token -> attempt
   send -> 201 {verification_required:true, email_delivery:"accepted"
-  |"failed"}; failure recoverable via resend; response NEVER contains
-  token. DB-success+send-failure is allowed and honestly reported.
+  |"failed"|"unknown"}; failures are recoverable via resend; response
+  NEVER contains token. API acceptance is not mailbox delivery.
 - GATE: login of unverified -> 403 {code:"email_verification_required"},
   NO session created. get_current_user adds verified check: sessions
   of unverified users (incl. pre-feature ones) -> 403 on protected
@@ -708,8 +708,9 @@ DB start (this machine, no Docker): sudo systemctl + native install
 ======================================================================
 - RESOLVE BY USER: verify a domain at resend.com/domains to allow
   deliveries to arbitrary recipients; then set MAIL_FROM_ADDRESS to
-  an address on that domain. Until then only shrijeet733@gmail.com
-  receives real email (Resend test-mode owner restriction).
+  an address on that domain. The current shared Resend testing sender is
+  not for ordinary recipients; the send-only key cannot inspect the
+  account's domain status or delivery history.
 - ROTATE the Resend API key (it passed through chat history): revoke
   it in the Resend dashboard, create a new one, update backend/.env
   only (never commit it).
@@ -728,7 +729,7 @@ DB start (this machine, no Docker): sudo systemctl + native install
 - Nested backend repo (owner decision pending; zero commits). Never
   `git add .` at root.
 - Security limitations (docs/SECURITY.md): process-local rate
-  limiting, no password reset, account-supervision endpoints still lack
+  limiting, no email-change flow, account-supervision endpoints still lack
   their own audit trail (biomass HAS one — biomass_audit_events,
   append-only at the DB level; extending it to Task 005 endpoints is
   the natural next hardening), not production-hardened.
@@ -942,5 +943,65 @@ random trycloudflare.com hostname is expired and is not recorded here.
   backend auth tests: 39 passed; frontend: 118 passed. No test email was
   sent to the friend's personal mailbox; frontend TypeScript/build passed.
   Key contents are not recorded here.
+
+======================================================================
+17. RESEND DELIVERY INVESTIGATION AND HARDENING (2026-10-30)
+======================================================================
+- Root cause confirmed: backend/.env still selects MAIL_BACKEND=resend and
+  MAIL_FROM_ADDRESS=onboarding@resend.dev, Resend's shared test sender. The
+  repo's earlier live provider response to a non-owner recipient was HTTP
+  403 with the testing-recipient restriction; an invalid-domain probe got
+  HTTP 422. Resend's current docs require an owned verified domain for an
+  ordinary sender address. The correct `to` field, account commit, and
+  verification-token lifecycle are not the issue.
+- Provider access checked without exposing the credential: read-only GETs to
+  /domains, /emails, and /usage each returned HTTP 401 with this send-only
+  key. Therefore current domain verification, email history/events, and
+  account usage cannot be asserted. A POST through the updated sender to
+  Resend's documented simulation recipient `delivered@resend.dev` returned
+  a 2xx response and email ID 01a18995-cff9-79db-84ce-956e5f68d53e. This verifies
+  API acceptance and payload compatibility only, not delivery to a real inbox.
+- No message was sent to the friend's personal mailbox. No domain name or
+  DNS record was invented or changed. The owner must add a domain/subdomain
+  they control in Resend, copy its generated DKIM/SPF and any requested
+  return-path records into DNS, wait for Resend to confirm sending as
+  verified, then set MAIL_FROM_ADDRESS to an address on that domain. DMARC is
+  separate and recommended, starting with a monitoring policy such as p=none.
+- Config hardening: APP_ENV supports development/test/production;
+  production requires COOKIE_SECURE=1 and rejects console mail, non-HTTPS
+  APP_BASE_URL, and Resend shared testing/placeholder senders. SMTP/Resend
+  required settings and sender syntax are validated at Settings/app startup;
+  development startup warns if the shared sender is active. Added
+  VERIFICATION_EMAIL_LIMIT_PER_HOUR (default 3) on normalized resend
+  identifiers in addition to the IP limiter. Existing unverified accounts
+  and hashed single-use tokens remain recoverable when a provider fails.
+- Delivery logging now captures a random correlation ID, user UUID, provider,
+  Resend email ID when returned, and safe error kind/status/provider code.
+  Resend tags and Idempotency-Key carry the correlation ID. No automatic retry
+  is made; timeouts are logged as acceptance-unknown, 429s are rate_limited,
+  and provider 408/5xx errors are transient errors. Logs exclude addresses,
+  tokens, credentials, full provider responses, and raw exception text. No
+  schema migration or webhook subsystem was needed.
+- Registration UI now says Resend accepted the request for processing and
+  explicitly says this does not confirm delivery. A timeout is reported as
+  unknown acceptance, with guidance to check inbox/spam before resending.
+  Resend verification uses a neutral message and does not show a false green
+  sent state.
+- Docs updated: backend/.env.example, backend/README.md, docs/SECURITY.md,
+  docs/API_CONTRACT.md, docs/CURRENT_STATE.md, and this context. The API
+  contract now also documents the already-implemented password recovery
+  endpoints; docs no longer claim password reset is unimplemented.
+- Runtime facts verified: FastAPI is served on 127.0.0.1:49173 and Vite
+  proxies /api to it; frontend is 127.0.0.1:5173. Public Quick Tunnel startup
+  sets APP_BASE_URL/CORS/secure cookie config to its HTTPS URL, so verification
+  links are not pointed at localhost in public mode.
+- Tests/checks: `uv run pytest -q` = 111 passed, 1 skipped; `pnpm run test` =
+  119 passed; `pnpm run build` (TypeScript + Vite production build) succeeded;
+  live Resend test-recipient POST accepted. No live delivery to the owner or
+  friend was attempted in this pass. Key contents are not recorded here.
+- Remaining external prerequisite: verified owned sender domain and a Resend
+  key allowed to send from it. For real delivery evidence, inspect the Resend
+  Emails event timeline and confirm `email.delivered` for one consenting
+  mailbox; an API email ID or a test-sink acceptance is not that evidence.
 
 ======================================================================

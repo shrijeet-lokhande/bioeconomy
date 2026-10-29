@@ -351,7 +351,8 @@ Honesty record from this task:
 - **`api/auth.py`** — register now creates the account unverified, issues a
   token, sends the email via the configured backend (purging stale rows) and
   returns **`RegisterResponse`** (`UserPublic` + `verification_required: true`
-  + honest `email_delivery: "accepted" | "failed"`); login 403 gate
+  + honest provider status `email_delivery: "accepted" | "failed" | "unknown"`);
+  login 403 gate
   `{"detail": {"message", "code": "email_verification_required"}}` **before
   any session is created**; `POST /verify-email` (one generic 400 for
   unknown/expired/used); `POST /resend-verification` (ALWAYS neutral 202,
@@ -434,12 +435,15 @@ Honesty record from this task:
 
 ## Known limitations / unfinished
 
-- Resend test mode restricts recipients to the account owner's mailbox
-  (`shrijeet733@gmail.com`) until a domain is verified at
-  resend.com/domains; then set `MAIL_FROM_ADDRESS` on that domain.
-- The Resend API key now lives in chat history as well — **rotate it**
-  (revoke + new key into `backend/.env`).
-- Rate limiter process-local; password reset/email change not implemented;
+- Resend test mode uses the shared testing sender and is not suitable for
+  arbitrary user verification emails. A domain the operator owns must be
+  verified in Resend and `MAIL_FROM_ADDRESS` must use that domain. The
+  currently configured send-only key cannot inspect domain state or email
+  events (read-only `/domains`, `/emails`, and `/usage` requests returned
+  401 on 2026-10-30); use the Resend dashboard for those checks.
+- The Resend key passed through chat history and should be rotated; do not
+  record its value in repo files or logs.
+- Rate limiter process-local; email change is not implemented;
   the Task 005 account-supervision actions still lack their own audit trail
   (biomass actions are audited — `biomass_audit_events`; see
   docs/SECURITY.md).
@@ -483,5 +487,52 @@ changes were introduced by this pass; `context.txt` §9.6 records it.
 
 The biomass inventory + marketplace (Phase 2 core) is now implemented and
 tested. Natural follow-ups: admin audit log for account supervision,
-password reset / email-change flows, PostGIS decision for spatial
-features (extension absent from this cluster).
+email-change flow, PostGIS decision for spatial features (extension absent
+from this cluster).
+
+## Email delivery review (2026-10-30)
+
+The app was configured with `MAIL_BACKEND=resend` and
+`MAIL_FROM_ADDRESS=onboarding@resend.dev`. This is Resend's shared test sender;
+earlier live provider responses for another recipient returned HTTP 403 with
+the testing-recipient restriction. Resend's current docs require a verified
+domain the operator owns for ordinary sender addresses. Registration's
+recipient field, persisted account/token order, and token lifecycle were
+inspected and do not explain the recipient difference.
+
+The configured key can send, but read-only `GET /domains`, `GET /emails`, and
+`GET /usage` each returned HTTP 401. Domain status, the account's historic
+events, and quota therefore remain unknown. A live send to Resend's documented
+`delivered@resend.dev` test sink returned a 2xx response and provider ID; that
+proves API acceptance only, not real mailbox delivery. No message was sent to
+the friend. The owner must verify an owned domain in Resend and set
+`MAIL_FROM_ADDRESS` on it before arbitrary-recipient delivery can be verified.
+The domain's DNS values are generated in Resend; use its displayed DKIM/SPF
+and any requested return-path records. DMARC is separate and recommended.
+
+Code changes add startup mail configuration validation, a development warning
+for the shared test sender, an `APP_ENV=production` guard for secure cookies
+and against that sender, three-per-hour identifier throttling for
+verification resends, Resend request idempotency/correlation metadata, provider
+email ID logging, safe error categories, and no blind retries. Registration
+still persists its unverified account and one-time hashed token before mail;
+provider rejection remains recoverable. Registration reports timeout/transport
+errors as `email_delivery: "unknown"`, since Resend may have accepted a
+request whose response was lost. The UI distinguishes acceptance, rejection,
+unknown outcome, and actual delivery. No database migration or webhook service
+was added.
+
+Public Quick Tunnel mode already sets the HTTPS `APP_BASE_URL`, CORS origin,
+and secure-cookie setting for its generated hostname. Ports remain frontend
+5173 and backend 49173, with Vite proxying `/api` to the backend. Docs updated:
+`backend/.env.example`, `backend/README.md`, `docs/SECURITY.md`,
+`docs/API_CONTRACT.md`, and `context.txt`. The API contract also documents the
+existing password-recovery endpoints, correcting stale docs that said reset
+was not implemented.
+
+Verification: `uv run pytest -q` — 111 passed, 1 skipped;
+`pnpm run test` — 119 passed; `pnpm run build` — TypeScript and production
+build succeeded. No real recipient inbox delivery was verified. The Resend
+free plan page currently lists 3,000 emails/month, 100/day, and three domains;
+confirm current account usage/limits in the dashboard because this key cannot
+read usage. No secrets or personal recipient addresses were recorded here.

@@ -17,10 +17,17 @@ from backend.config import get_settings
 
 
 def create_app() -> FastAPI:
-    settings = get_settings()
     # Make INFO logs (e.g. MAIL[...] delivery acceptances) visible under
     # plain `uvicorn backend.main:app`, whose default root level is WARNING.
     logging.basicConfig(level=logging.INFO)
+    settings = get_settings()
+    sender_domain = settings.mail_from_address.rsplit("@", 1)[-1].lower()
+    if settings.mail_backend == "resend" and sender_domain == "resend.dev":
+        logging.getLogger("backend.startup").warning(
+            "Resend shared test sender is configured; it cannot be used for "
+            "ordinary user verification. Verify an owned sender domain and "
+            "update MAIL_FROM_ADDRESS."
+        )
     app = FastAPI(title=settings.app_name, version="0.1.0")
 
     app.add_middleware(

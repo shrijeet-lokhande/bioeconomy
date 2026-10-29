@@ -160,10 +160,8 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
 export interface RegisterResult extends AuthUser {
   verification_required: boolean;
-  /** "accepted" when the backend handed the email to the provider;
-   * "failed" when delivery could not be completed — the UI must then offer
-   * resend and never claim an email was sent. */
-  email_delivery: "accepted" | "failed";
+  /** Provider API result only; "accepted" does not mean mailbox delivery. */
+  email_delivery: "accepted" | "failed" | "unknown";
 }
 
 export const authApi = {

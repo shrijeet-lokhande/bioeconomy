@@ -60,6 +60,7 @@ backed by PostgreSQL with Alembic migrations.
 | Variable | Meaning |
 | --- | --- |
 | `DATABASE_URL` | SQLAlchemy URL, psycopg 3 dialect: `postgresql+psycopg://user:password@host:5432/bioeconomy` |
+| `APP_ENV` | `development` (default), `test`, or `production`; production requires `COOKIE_SECURE=1`, HTTPS links, a non-console backend, and a non-test/non-placeholder sender |
 | `CORS_ORIGINS` | JSON array of allowed browser origins, e.g. `["http://localhost:5173"]` |
 | `COOKIE_SECURE` | `1` = session cookie sent only over HTTPS. **Must be 1 in production.** |
 | `COOKIE_SAMESITE` | `lax` (default) or `strict` |
@@ -68,6 +69,7 @@ backed by PostgreSQL with Alembic migrations.
 | `RATE_LIMIT_PER_MINUTE` | Attempts per client IP per minute, default 5 |
 | `APP_BASE_URL` | Trusted base URL used to build verification links (NEVER from the request Host header) |
 | `VERIFICATION_TOKEN_MINUTES` | Verification token lifetime, default 30 |
+| `VERIFICATION_EMAIL_LIMIT_PER_HOUR` | Maximum resend-verification attempts for one normalized address in one hour, default 3 |
 | `MAIL_BACKEND` | `console` (dev outbox), `smtp` (generic SMTP), or `resend` (Resend HTTP API) |
 | `MAIL_OUTBOX_DIR` | Where the console backend writes `.eml` files (default `.mail_outbox`, gitignored) |
 | `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_USE_TLS` | Generic SMTP configuration (`MAIL_USE_TLS=1` enforces STARTTLS) |
@@ -92,16 +94,69 @@ existing 10–200 character policy and Argon2id hashing. Reset pages strip
 the token from the address bar and the app sets a no-referrer policy.
 
 For local testing, `MAIL_BACKEND=console` writes messages to the ignored
-`.mail_outbox/`; open the newest message and follow the link. To send real
-mail, configure `MAIL_BACKEND=resend`, `RESEND_API_KEY`, and
-`MAIL_FROM_ADDRESS` (use `onboarding@resend.dev` for Resend test mode, which
-may deliver only to the account owner's address until a domain is verified).
-Set `APP_BASE_URL` to the trusted frontend origin; production must use HTTPS.
-Authentication rate limits use the current process-local limiter, so put a
-shared limiter and proxy-aware IP handling in front of multi-worker production
-deployments. Reset requests are additionally limited to three per normalized
-email identifier per hour using a SHA-256 identifier key; the email address is
-not retained in the limiter's bucket keys.
+`.mail_outbox/`; open the newest message and follow the link. For real Resend
+delivery, configure `MAIL_BACKEND=resend`, `RESEND_API_KEY`, and
+`MAIL_FROM_ADDRESS` on a domain you own and Resend marks verified. Resend's
+`onboarding@resend.dev` shared sender is for testing; it is not a production
+sender for arbitrary users. The app fails startup in `APP_ENV=production` if
+`COOKIE_SECURE=0`, the sender is shared/placeholder, the backend is console,
+or `APP_BASE_URL` is not HTTPS. A configured sender address is not proof that
+its domain is verified. In development, the shared sender remains available
+for test-mode use but startup prints a warning that it cannot serve ordinary
+user verification.
+
+### Resend domain and delivery setup
+
+1. In the Resend dashboard, open **Domains**, add a domain or (recommended)
+   a transactional subdomain you control, and copy the DNS records Resend
+   displays exactly. Add the displayed DKIM and SPF records, plus any return-
+   path records shown for the chosen configuration, at the domain's DNS host.
+   Record names and values are generated for that domain; never copy sample
+   values from this README or create a duplicate SPF record at the same host.
+2. Click **Verify** in Resend and wait until sending capability is marked
+   verified. Resend requires an owned verified domain for ordinary sender
+   addresses. DMARC is strongly recommended for authentication/alignment; start
+   with a monitoring policy such as `p=none` while reviewing reports, then
+   tighten it only after every legitimate sender is accounted for. DMARC is a
+   separate DNS TXT record at `_dmarc.<domain>` and does not replace SPF/DKIM.
+3. Set `MAIL_FROM_ADDRESS=verify@<verified-domain>` and `APP_ENV=production`.
+   Use a send-only API key permitted to send from that verified domain. Keep
+   `RESEND_API_KEY` in `backend/.env` or a secret store, never in source or
+   logs. Restart the backend after changing configuration.
+4. Public responses and the registration UI distinguish Resend API acceptance
+   from mailbox delivery. The server logs the correlation ID and Resend email
+   ID, if returned; they contain no recipient address, token, or provider error
+   body. Timeouts are recorded as an unknown acceptance state and are not
+   retried automatically. Use the correlation ID to find the matching message
+   in Resend's Emails dashboard.
+5. In Resend, open **Emails** and inspect the individual event timeline. Check
+   for `email.sent`, `email.delivered`, `email.bounced`,
+   `email.delivery_delayed`, `email.complained`, `email.failed`, or
+   `email.suppressed` as applicable. `email.sent`/an API email ID means the
+   provider accepted it, not that the mailbox received it. A Delivered event
+   confirms acceptance by the recipient mail server, not inbox placement; also
+   check spam/quarantine and the recipient provider's logs when needed.
+6. Automated tests mock Resend. For a live domain setup, register one
+   consenting test mailbox, confirm an `email.delivered` event, open the link,
+   and verify that reusing the token fails. Resend's `delivered@resend.dev`
+   is a test recipient useful for request-path checks only; it does not prove
+   delivery to arbitrary inboxes.
+
+The configured key on this development machine is send-only: read-only API
+requests for domains, email history, and usage returned HTTP 401, so no
+account-level domain state, recipient events, or quota could be inspected
+programmatically. Use the Resend dashboard for those checks. Resend's current
+public pricing lists a free quota, but plan and account-level limits can
+change; check [current pricing](https://resend.com/pricing) and usage in the
+account rather than treating an email ID as proof of a quota or delivery.
+At this documentation update (2026-10-30), the public free plan lists 3,000
+emails per month, a 100-per-day limit, and three domains; the actual account's
+usage remains unverified because the configured key cannot read `/usage`.
+
+Authentication rate limits are process-local, so use a shared limiter and
+proxy-aware IP handling for multi-worker production. Verification resends are
+also limited to three attempts per normalized email identifier per hour using
+a SHA-256 identifier key; the address itself is not retained in limiter keys.
 
 | Method | Path | Auth | Success | Error statuses |
 | --- | --- | --- | --- | --- |
@@ -113,7 +168,8 @@ not retained in the limiter's bucket keys.
 | POST | `/resend-verification` | none | 202 always-identical neutral message | 422 validation, 429 |
 
 `RegisterResponse` = `UserPublic` fields + `verification_required: true` +
-`email_delivery: "accepted" | "failed"` — honest delivery reporting.
+`email_delivery: "accepted" | "failed" | "unknown"` — provider API status,
+not mailbox delivery status. A timeout is reported as unknown acceptance.
 `UserPublic` = `{ id, full_name, email, role, is_active, is_email_verified,
 created_at, updated_at }`. Password hashes, session tokens, and
 verification tokens never appear in any response. Role and verification
@@ -214,17 +270,19 @@ UPDATE users SET role = 'admin' WHERE email = '<address>';
   (gitignored). Open the LATEST file — links are written unwrapped, so the
   URL is copyable — and follow it. Full local cycle: register → latest
   `.eml` → click link → sign in.
-- **Resend** (as configured on this machine): `MAIL_BACKEND=resend` +
-  `RESEND_API_KEY`. Provider note: without a verified domain, Resend
-  delivers ONLY to the account owner's own mailbox and rejects other
-  recipients with HTTP 403 — surfaced honestly as
-  `email_delivery: "failed"`, never claimed as sent. To reach arbitrary
-  recipients: verify a domain at resend.com/domains and set
-  `MAIL_FROM_ADDRESS` to an address on that domain.
+- **Resend** (current local configuration): `MAIL_BACKEND=resend` with
+  `MAIL_FROM_ADDRESS=onboarding@resend.dev`. This is the shared testing
+  sender and is not suitable for arbitrary users. Earlier live API responses
+  rejected another recipient; the current send-only key cannot read account
+  domains or delivery events. To send to users, verify a domain you own and
+  use a sender address on it; the production config guard rejects the shared
+  test sender.
 - **Generic SMTP**: `MAIL_BACKEND=smtp` + the `MAIL_*` variables above.
-- Acceptances are visible in the server log
-  (`MAIL[resend] verification email accepted for …`); failures are logged
-  with the provider reason.
+- Server logs record the email purpose, opaque correlation ID, user UUID,
+  provider, provider email ID (when returned), and safe failure category/status
+  code. They do not record recipient addresses, tokens, credentials, provider
+  response bodies, or raw exception messages. Acceptance is not a delivery
+  confirmation; inspect the message's event timeline in Resend.
 
 ### Administrative verification of pre-existing accounts (explicit)
 
@@ -274,7 +332,7 @@ trigger) — 74 tests total.
 - Geospatial (PostGIS) features: deferred — the extension is absent from
   this PostgreSQL instance; biomass lots carry only free-text storage
   locations, no coordinates.
-- Password reset: not implemented.
+- Email change: not implemented.
 - Rate limiting: per-process memory only — not shared across workers/instances;
   replace with a shared store (Redis) before multi-instance production.
 - Deployment hardening (TLS termination, proxy-aware client IPs, structured

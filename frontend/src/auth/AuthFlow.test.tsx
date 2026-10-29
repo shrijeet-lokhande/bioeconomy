@@ -230,7 +230,7 @@ describe("registration flow", () => {
     expect(
       await screen.findByRole("heading", { name: "Verify your email" }),
     ).toBeTruthy();
-    expect(screen.getByText(/A verification email was sent/i)).toBeTruthy();
+    expect(screen.getByText(/Resend accepted the verification email for processing/i)).toBeTruthy();
     expect(
       screen.getAllByText(/jane@example\.com/).length,
     ).toBeGreaterThan(0);
@@ -254,6 +254,36 @@ describe("registration flow", () => {
     expect(
       calls.filter((call) => call.url.includes("/auth/resend-verification")),
     ).toHaveLength(1);
+  });
+
+  it("does not call a timed-out email accepted or failed", async () => {
+    setHash("#/register");
+    const { stub } = callLog();
+    stub([
+      { method: "GET", path: "/auth/me", status: 401 },
+      {
+        method: "POST",
+        path: "/auth/register",
+        status: 201,
+        body: { ...USER, is_email_verified: false, verification_required: true, email_delivery: "unknown" },
+      },
+    ]);
+
+    const user = userEvent.setup();
+    renderApp();
+    await screen.findByRole("button", { name: "Create account" });
+    await user.type(screen.getByLabelText("Full name *"), "Jane Farmer");
+    await user.type(screen.getByLabelText("Email address *"), "jane@example.com");
+    await user.type(screen.getByLabelText("Password *"), "long-enough-pass");
+    await user.type(screen.getByLabelText("Confirm password *"), "long-enough-pass");
+    await user.click(screen.getByRole("button", { name: "Create account" }));
+
+    expect(
+      await screen.findByText(/did not confirm whether it accepted the request/i),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(/Resend accepted the verification email/i),
+    ).toBeNull();
   });
 });
 
