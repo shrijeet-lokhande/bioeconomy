@@ -4,3 +4,4 @@
 # Local project documentation and working context are intentionally excluded.
 /docs/
 /context.txt
+/.env
