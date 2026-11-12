@@ -1,2 +1,6 @@
 # Project-local Cloudflare Tunnel configuration/credentials, if created later.
 .cloudflared/
+
+# Local project documentation and working context are intentionally excluded.
+/docs/
+/context.txt
