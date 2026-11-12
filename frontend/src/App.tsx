@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { AppShell } from "./components/AppShell";
 import { PagePlaceholder } from "./components/PagePlaceholder";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -12,6 +12,7 @@ import { AdminPage } from "./pages/AdminPage";
 import { MarketplacePage } from "./pages/MarketplacePage";
 import { useAuth } from "./auth/AuthContext";
 import { BiomassInventoryPage } from "./pages/BiomassInventoryPage";
+const MapExplorerPage = lazy(() => import("./pages/MapExplorerPage").then((module) => ({ default: module.MapExplorerPage })));
 import {
   findRoute,
   routeIdFromLocation,
@@ -26,6 +27,8 @@ function renderPage(routeId: RouteId): ReactNode {
       return <BiomassInventoryPage />;
     case "marketplace":
       return <MarketplacePage />;
+    case "map-explorer":
+      return <Suspense fallback={<div className="auth-loading" role="status">Loading map tools…</div>}><MapExplorerPage /></Suspense>;
     case "login":
       return <LoginPage />;
     case "register":

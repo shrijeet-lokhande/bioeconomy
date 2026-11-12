@@ -170,3 +170,11 @@ Facts:
 
 - To start/stop the service on this machine: `sudo systemctl start|stop
   postgresql.service` (requires your sudo password).
+
+## Map Explorer (2026-11-12)
+
+The first MapLibre map uses external basemap styles and client-configured
+GeoJSON/vector/raster overlays. It does not require PostGIS, alter database
+models, add migrations, or perform geospatial queries in the API. PostgreSQL
+and extension state were left unchanged. See [MAP.md](MAP.md) for current
+source status and future compute/API boundaries.

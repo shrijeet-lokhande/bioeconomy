@@ -272,3 +272,13 @@ not aspirational: items marked "deferred" are not implemented.
 - The verification email content is a plain, professional template with no
   click-tracking; deliverability (SPF/DKIM alignment) depends on the
   provider/domain setup once a real sending domain is verified.
+
+## Map and geolocation privacy
+
+The browser asks for location only after an explicit user action, keeps the
+coordinates in component memory, and does not post or persist them. Location
+requires a secure context (HTTPS or localhost). No precise location is added
+to analytics or application logs. The map's default style is an external
+OpenFreeMap service, so user browsers make tile requests to that provider;
+review its current terms and privacy policy for deployment-specific decisions.
+Map basemap geography is not represented as official forest data.

@@ -501,3 +501,11 @@ Geospatial dataset provenance endpoints, IoT ingestion, analytics
 (biomass inventory + marketplace are now implemented above). When this
 writer documents a planned-but-unbuilt contract, it must be clearly marked
 as a draft until the implementation and its tests exist.
+
+## Map Explorer
+
+The current MapLibre map loads public/configured basemap styles directly from
+its provider and contains no map-specific backend API endpoints. No government
+forest, land-cover, biomass, agricultural or IoT dataset is currently served.
+Future authenticated dataset endpoints must document source/provenance and
+keep large geospatial processing behind the separate compute-service boundary.

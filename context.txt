@@ -1047,3 +1047,98 @@ random trycloudflare.com hostname is expired and is not recorded here.
 - Verification: `uv run pytest -q` = 110 passed, 1 skipped (8 existing
   deprecation warnings); `pnpm run test` = 119 passed; `pnpm run build`
   (TypeScript + Vite production build) succeeded. `git diff --check` clean.
+
+======================================================================
+18. MAPLIBRE FOREST MAP IMPLEMENTATION (2026-11-12)
+======================================================================
+- Integrated MapLibre GL JS 6.17.0 as a lazy-loaded React route in the
+  existing hash router. `MapLibreCanvas` owns map lifecycle, Strict Mode
+  cleanup, style switching, resize, provider loading/error state, and map
+  interactions. A typed centralized overlay registry supports GeoJSON,
+  vector-tile and raster sources with configured line/fill/circle/symbol/raster
+  render layers, ordering, opacity, visibility, legend, zoom, attribution and
+  dataset provenance. Overlay manager handles runtime add/update/remove.
+- Default base map: OpenFreeMap Liberty, configured by default style URL;
+  public, no key, no quota and commercial use supported by its current site.
+  OpenFreeMap attribution is shown automatically by MapLibre and repeated in
+  the data note. Service is provided as-is without SLA. Optional terrain and
+  satellite styles are disabled until configured. MapTiler-style public keys
+  must be origin/API restricted and are browser-visible, not secrets.
+- Map starts centered on Maharashtra and has zoom, reset orientation,
+  fullscreen, explicit current location, dynamic basemap selection, layer
+  panel, feature details, coordinate/zoom readout and attribution/provenance
+  note. Location permission is requested only on click, requires HTTPS or
+  localhost, handles denied/unavailable/timeout/insecure/invalid results,
+  shows marker + geodesic accuracy polygon, and remains in memory only.
+- Registry currently has ZERO overlays. No official government forest
+  boundary, FSI forest cover, NRSC/Bhuvan, Maharashtra forestry, Survey of
+  India, biomass, agriculture or IoT data has been integrated. No fake
+  features are shown. Six future categories are clearly marked empty.
+- No new backend API, DB table, PostGIS extension or migration. Heavy spatial
+  work remains a future authenticated compute-service boundary; map data
+  should flow via application API as small filtered GeoJSON or vector tiles.
+- New environment file: `frontend/.env.example`. Variables:
+  VITE_MAP_STYLE_URL, VITE_MAP_ATTRIBUTION, VITE_MAP_TERRAIN_STYLE_URL,
+  VITE_MAP_TERRAIN_ATTRIBUTION, VITE_MAP_SATELLITE_STYLE_URL,
+  VITE_MAP_SATELLITE_ATTRIBUTION. Unset optional styles remain disabled;
+  default basemap works without a key. Dependencies: maplibre-gl 6.17.0;
+  package-lock and pnpm-lock updated.
+- Files: README.md, frontend package/lock files, routing/shell/app, global
+  map CSS, Map Explorer page, map config/registry/manager/canvas, frontend env
+  example, map tests, docs/MAP.md, docs/API_CONTRACT.md, docs/DATABASE.md,
+  docs/SECURITY.md, docs/CURRENT_STATE.md, and this context.
+- Verification: `pnpm run test -- --run` passed (15 files, 133 tests);
+  `pnpm run build` passed, including `tsc -b`; `git diff --check` passed. The
+  production build reports the lazy MapLibre chunk at about
+  1.08 MB minified / 296.67 kB gzip, above Vite's 500 kB advisory threshold.
+  The OpenFreeMap Liberty style endpoint returned HTTP 200 during setup.
+  No backend behavior changed, so backend tests were not required. Provider
+  availability still needs deployment monitoring; optional provider styles
+  and credentials require deployment configuration.
+
+======================================================================
+19. CROSS-PLATFORM DEVELOPMENT SETUP (2026-11-12)
+======================================================================
+- Added `scripts/setup.ps1` and `scripts/setup.sh` for Windows 10/11,
+  Arch, Ubuntu, and Debian. They detect/install Git, Node/npm, Python 3.14,
+  uv, PostgreSQL tools, and shell network/port utilities from winget or
+  distribution repositories. Linux Node fallback downloads official Node 22
+  archives only after verifying the published SHA-256 checksum; installation
+  is under the user's local share directory.
+- Added `scripts/start.ps1` and `scripts/start.sh`. Both locate the repository
+  from the script path, validate dependencies/configuration and DB access,
+  run Alembic migrations, check fixed frontend/API ports, avoid duplicates,
+  show URLs and logs, and stop only the launcher-started process tree/group.
+  Neither kills unrelated port owners. `frontend/package.json` now has a
+  cross-platform `dev` command using concurrently plus `dev:frontend` for
+  manual split-terminal debugging.
+- Added `scripts/dev_env.py` shared for sanitized PostgreSQL connectivity and
+  safe development DB creation. It creates only a missing database named
+  exactly `bioeconomy` while `APP_ENV=development` and using the configured
+  role; it never drops/resets a database or changes auth settings. Setup
+  synchronizes with `uv sync --locked --python 3.14`, installs frontend
+  packages with `npm ci`, verifies app import/build, then applies Alembic.
+- Both `.env` files are copied from examples only when absent. Existing
+  `backend/.env` and `frontend/.env` values are preserved. No real credentials
+  are generated or printed. Local email remains the console outbox by default;
+  Mailgun/SMTP require operator-provided settings. Optional map styles require
+  operator URLs/tokens; default style needs no key.
+- Usage: Windows `powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1`
+  then `powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1`; Linux
+  `chmod +x scripts/setup.sh scripts/start.sh && ./scripts/setup.sh`, then
+  `./scripts/start.sh`. Default URLs are frontend 5173, API 49173, docs
+  `/docs`.
+- Verification: PowerShell parser passed for both `.ps1` files; Git Bash
+  `bash -n` passed for both `.sh` files; `uv run --locked pytest -q` passed
+  (110 passed, 1 skipped, 8 existing deprecation warnings); frontend suite
+  passed (133 tests), and TypeScript/Vite production build passed with the
+  documented MapLibre bundle-size warning. PostgreSQL connection and current
+  migration head were verified without changing existing tables. The shared
+  dev command and Windows launcher were started, HTTP-checked, Ctrl+C-stopped,
+  and confirmed to release both ports. A temporary npm.cmd shim delegated to
+  pnpm because npm is absent from this execution environment. Port-conflict
+  reporting was exercised. Linux runtime/setup execution was unavailable;
+  only Bash syntax was validated here. Full `npm ci`, clean-machine prerequisite
+  installation, and path-with-spaces execution remain platform checks for a
+  clean Windows/Linux machine. The local Windows file mode cannot encode the
+  Git executable bit; Linux install instructions explicitly run `chmod +x`.

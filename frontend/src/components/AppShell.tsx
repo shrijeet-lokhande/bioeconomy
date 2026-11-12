@@ -84,7 +84,7 @@ export function AppShell({ activeRoute, children }: AppShellProps) {
         </ul>
       </nav>
 
-      <main id="main-content" className="app-main">
+      <main id="main-content" className={`app-main${activeRoute.id === "map-explorer" ? " app-main--map" : ""}`}>
         {children}
       </main>
 

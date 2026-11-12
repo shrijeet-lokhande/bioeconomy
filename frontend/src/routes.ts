@@ -2,7 +2,7 @@
  * Route registry for the prototype.
  *
  * Navigation is intentionally dependency-free hash routing; the Overview,
- * Biomass Inventory, Marketplace, Admin console, and auth pages are real.
+ * Biomass Inventory, Marketplace, Map Explorer, Admin console, and auth pages are real.
  * Re-evaluate when more sections become real; replacing this with a proper
  * router (and history URLs) must be an explicit decision.
  */
@@ -90,12 +90,11 @@ export const ROUTES: readonly AppRoute[] = [
     hash: "#/map-explorer",
     heading: "Map Explorer",
     description:
-      "Placeholder. Geospatial datasets and map layers, with recorded source, " +
-      "date, coverage, and limitations for each dataset shown.",
-    status: "planned",
+      "Interactive forest-centric geography with sourced map overlays, " +
+      "provenance and explicit availability status.",
+    status: "prototype",
     showInNav: true,
     access: "protected",
-    plannedIn: "Roadmap Phase 4",
   },
   {
     id: "analytics",

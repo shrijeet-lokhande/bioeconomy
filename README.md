@@ -87,94 +87,126 @@ bioeconomy/
 └── README.md
 ```
 
-## Getting Started
+## Installation and Setup
+
+The supported local development environments are Windows 10/11 (PowerShell), Arch Linux, Ubuntu, and Debian. The app uses Python 3.14 managed by uv, Node.js 20.19+ or 22.12+ with npm, PostgreSQL, and Git. Docker is not required. Setup scripts install available prerequisites from winget or official distribution repositories, sync locked dependencies, preserve existing `.env` files, and apply Alembic migrations without dropping data.
 
 ### Prerequisites
 
-- Python and [uv](https://docs.astral.sh/uv/)
-- Node.js and npm
-- Docker Engine and Docker Compose
-- Git
+- Git, PowerShell on Windows or Bash on supported Linux.
+- Internet access for official package repositories and dependency downloads.
+- PostgreSQL and a local role. Automatic database creation is limited to a development database named `bioeconomy` and requires that role to have `CREATEDB` permission.
 
-### 1. Clone the Repository
+### Windows Installation
 
-```bash
-git clone <your-repository-url>
+```powershell
+git clone https://github.com/shrijeet-lokhande/bioeconomy.git
 cd bioeconomy
+powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
 
-### 2. Start the Backend
+The script detects or installs Git, Node.js LTS, Python 3.14, uv, and PostgreSQL 18 when official winget packages are available. PostgreSQL may require an interactive installer to set an administrator password. If winget cannot find an official package, install it from the vendor URL provided by the script and rerun setup. Reopen PowerShell if new tools are not yet on PATH.
+
+### Linux Installation
+
+```bash
+git clone https://github.com/shrijeet-lokhande/bioeconomy.git
+cd bioeconomy
+chmod +x scripts/setup.sh scripts/start.sh
+./scripts/setup.sh
+```
+
+Arch uses pacman and systemd; initialize PostgreSQL first if a fresh Arch install reports the cluster is not initialized. Ubuntu and Debian use apt and systemd. The scripts do not use AUR or remote root shell installers. uv supplies Python 3.14 if needed. If the distribution Node package is too old for Vite, install a supported LTS version from [nodejs.org](https://nodejs.org/en/download/) and rerun setup.
+
+### Environment Configuration
+
+Setup creates `backend/.env` and `frontend/.env` from their examples only when missing. Existing files are preserved. Both are gitignored; examples contain placeholders only.
+
+Set `DATABASE_URL` in `backend/.env` to a PostgreSQL role/database you control, for example:
+
+```text
+DATABASE_URL=postgresql+psycopg://bioeconomy_app:<your-local-password>@localhost:5432/bioeconomy
+```
+
+URL-encode reserved characters in passwords. Example `app_user` and `app_password` values are placeholders, not pre-created PostgreSQL credentials. On Linux, open the PostgreSQL administrator console with `sudo -u postgres psql`; on Windows, open `psql` as the PostgreSQL administrator. Choose a local password and execute:
+
+```sql
+CREATE ROLE bioeconomy_app LOGIN CREATEDB PASSWORD '<choose-a-local-password>';
+CREATE DATABASE bioeconomy OWNER bioeconomy_app;
+```
+
+If the role cannot connect or create the development DB, setup reports a sanitized error and preserves existing databases. Fix the URL/role permission and rerun.
+
+Local email defaults to `MAIL_BACKEND=console`; messages are written to gitignored `backend/.mail_outbox`. For real delivery, configure Mailgun (`MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, `MAILGUN_REGION`, matching `MAIL_FROM_ADDRESS`) or SMTP as documented in [backend/README.md](backend/README.md). Never commit credentials or put them in frontend `VITE_` variables.
+
+Map tiles use the default keyless OpenFreeMap style. Optional providers use `VITE_MAP_TERRAIN_STYLE_URL` or `VITE_MAP_SATELLITE_STYLE_URL` in `frontend/.env`; restrict browser-visible provider keys to the app's origins. See [docs/MAP.md](docs/MAP.md).
+
+### Starting Bioeconomy
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
+```
+
+Linux:
+
+```bash
+./scripts/start.sh
+```
+
+The launcher checks the database, applies pending Alembic migrations, then starts FastAPI and Vite. It streams tagged logs, detects port conflicts, avoids duplicate instances, and stops only its own child processes on Ctrl+C.
+
+### Accessing the application
+
+- Frontend: <http://127.0.0.1:5173>
+- Backend: <http://127.0.0.1:49173>
+- API documentation: <http://127.0.0.1:49173/docs>
+- Liveness: <http://127.0.0.1:49173/api/v1/health>
+
+Vite proxies `/api` to FastAPI. The health route is liveness-only; the launcher separately verifies database connectivity.
+
+### Troubleshooting
+
+| Issue | Windows | Linux |
+| --- | --- | --- |
+| Node.js missing/old | `node --version; npm --version`; install supported LTS from nodejs.org | Same commands; install Node.js 20.19+ or 22.12+ |
+| Python/uv missing | `uv --version; uv python list` | `uv --version; uv python list` |
+| PostgreSQL stopped | `Get-Service *postgres*`; `Start-Service <service>` in elevated PowerShell | `systemctl status postgresql`; `sudo systemctl start postgresql` |
+| Database auth failure | `psql -h localhost -U bioeconomy_app -d bioeconomy` | Same command |
+| Migration failure | `cd backend; uv run alembic current; uv run alembic upgrade head` | `cd backend && uv run alembic current && uv run alembic upgrade head` |
+| Port occupied | `Get-NetTCPConnection -State Listen -LocalPort 5173,49173` | `ss -ltnp '( sport = :5173 or sport = :49173 )'` |
+| API proxy errors | Check `http://127.0.0.1:49173/api/v1/health` and launcher logs | Same URL; inspect tagged API logs |
+| Map tiles missing | Check browser access to `tiles.openfreemap.org`; restart Vite after `.env` edits | Same |
+| Mail errors | Console mail is in `backend/.mail_outbox`; check `MAIL_*`/`MAILGUN_*` | Same; inspect Mailgun Events if applicable |
+
+Scripts do not print database URLs or provider secrets. Real mail credentials are unnecessary with the local console outbox.
+
+### Manual Development Mode
+
+After setup and database configuration, use separate terminals:
 
 ```bash
 cd backend
-cp .env.example .env        # then edit .env with your real database URL
-uv sync
-uv run alembic upgrade head # create users + auth_sessions tables
-uv run uvicorn backend.main:app --reload
+uv run --locked alembic upgrade head
+uv run --locked uvicorn backend.main:app --host 127.0.0.1 --port 49173
 ```
-
-The backend exposes `backend/main.py:app` in the src layout (README history
-documented `backend/app/main.py` — that layout does not exist; see docs/CURRENT_STATE.md).
-
-Authentication endpoints live under `/api/v1/auth` (register, login,
-logout, me, verify-email, resend-verification, forgot-password,
-reset-password). Registration requires email
-confirmation before first sign-in: configure a mail backend (`MAIL_BACKEND`:
-  `console` for a local gitignored outbox, `mailgun`, or `smtp`; see
-backend/README.md). Only run this after `alembic upgrade head` — the app
-never creates tables itself.
-
-A role-gated admin supervision API lives under `/api/v1/admin/*`
-(overview stats, user list/detail, account actions, session revocation,
-role changes). The server enforces the role on every request (403
-`admin_required` otherwise) — no endpoint can create an admin; the first
-admin is granted by operator SQL only:
-
-```sql
-UPDATE users SET role = 'admin' WHERE email = '<address>';
-```
-
-See backend/README.md (Admin section) and docs/SECURITY.md for the full
-authorization model and the self-protection rules.
-
-API documentation is available at `/docs` when the server is running.
-
-### 3. Start the Frontend
-
-In a separate terminal:
 
 ```bash
 cd frontend
-npm install
-npm run dev
+npm run dev:frontend
 ```
 
-Vite proxies `/api` to the backend during development. Sign up at the
-Create account page, sign in, and the dashboard shows your account; the
-biomass inventory and marketplace pages run against the real backend API
-(the Overview dashboard remains a small, clearly-labelled local demo).
+The `dev` command starts both services; `dev:frontend` starts only Vite for
+this separate-terminal workflow. Use the launcher scripts for port/database
+checks and coordinated cleanup. Backend tests: `uv run --locked pytest -q` in
+`backend`; frontend tests: `npm test -- --run` in `frontend`.
 
-Registering a lot or publishing a marketplace listing requires uploading
-1–5 images (JPEG/PNG/WebP, up to 5 MB each) together with the record;
-image files are stored server-side under generated names and are served
-only through the authorized image endpoint (`docs/SECURITY.md`,
-Task 007 section).
+### Production Deployment
 
-Vite prints the local development URL in the terminal.
+These scripts and Vite's dev server are for local development only. They do not configure TLS, production secrets, process supervision, or production frontend hosting. Deploy built frontend assets and the API through an appropriately secured platform; do not expose the Vite dev server publicly.
 
-### 4. Start Supporting Services
-
-Once `docker-compose.yml` is configured:
-
-```bash
-docker compose up -d
-```
-
-Check service status:
-
-```bash
-docker compose ps
-```
+Authentication endpoints are under `/api/v1/auth`; the role-gated admin API is under `/api/v1/admin/*`. See [backend/README.md](backend/README.md) and [docs/SECURITY.md](docs/SECURITY.md). Biomass uploads require 1–5 images. MapLibre is integrated, but no official forest or biomass data layers are configured yet.
 
 ## Development Principles
 
